@@ -170,3 +170,45 @@ function New-EngineBackup {
     $bwb.Close($false)
     return @{ Path = $path; Sheets = $created }
 }
+
+# Build/refresh a "Report" analysis sheet in the SAME workbook. Since there is
+# no engine sheet to eyeball anymore, this gives the flag breakdown and a table
+# of UNIQUE addresses with their code/flag/count. It replaces any existing sheet
+# of the same name (it is our own output, never customer data) and writes the
+# whole grid in ONE value assignment so nothing can scramble.
+#   $flagRows   : array of [pscustomobject]@{ Flag; Count; Pct }
+#   $uniqueRows : array of [pscustomobject]@{ Address; City; Zip; Code; Flag; Count }
+function New-NeReport {
+    param($excel, $wb, [string]$sheetName, $flagRows, $uniqueRows, [string]$codeFormat = '000')
+    $existing = $null
+    foreach ($s in $wb.Worksheets) { if ($s.Name -eq $sheetName) { $existing = $s } }
+    if ($existing) { $existing.Delete() | Out-Null }
+    $sh = $wb.Worksheets.Add()
+    $sh.Name = $sheetName
+
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $rows.Add(@('City Code Report', '', '', '', '', ''))
+    $rows.Add(@('Generated', (Get-Date).ToString('yyyy-MM-dd HH:mm'), '', '', '', ''))
+    $rows.Add(@('', '', '', '', '', ''))
+    $rows.Add(@('FLAG SUMMARY (all rows)', '', '', '', '', ''))
+    $rows.Add(@('Flag', 'Count', 'Percent', '', '', ''))
+    foreach ($f in $flagRows) { $rows.Add(@($f.Flag, $f.Count, ('{0:N1}%' -f $f.Pct), '', '', '')) }
+    $rows.Add(@('', '', '', '', '', ''))
+    $rows.Add(@("UNIQUE ADDRESSES ($($uniqueRows.Count))", '', '', '', '', ''))
+    $rows.Add(@('Address', 'City', 'Zip', 'NE City Code', 'Flag', 'Count'))
+    $firstUnique = $rows.Count + 1   # 1-based sheet row of the first unique-address data row
+    foreach ($u in $uniqueRows) { $rows.Add(@($u.Address, $u.City, $u.Zip, $u.Code, $u.Flag, $u.Count)) }
+
+    # NOTE: PowerShell variables are case-insensitive - do NOT use $R and $r
+    # together (a loop counter $r would clobber a row-count $R). Distinct names.
+    $nrows = $rows.Count
+    $arr = [Array]::CreateInstance([object], $nrows, 6)
+    for ($ir = 0; $ir -lt $nrows; $ir++) { $line = $rows[$ir]; for ($ic = 0; $ic -lt 6; $ic++) { $arr.SetValue($line[$ic], $ir, $ic) } }
+    $sh.Range($sh.Cells(1, 1), $sh.Cells($nrows, 6)).Value2 = $arr
+
+    # 000 format on the code column of the unique table
+    if ($nrows -ge $firstUnique) { try { $sh.Range($sh.Cells($firstUnique, 4), $sh.Cells($nrows, 4)).NumberFormat = $codeFormat } catch { } }
+    # widen the address column a bit if the host supports it (real Excel; mock ignores)
+    try { $sh.Columns(1).ColumnWidth = 34; $sh.Columns(2).ColumnWidth = 16 } catch { }
+    return @{ Sheet = $sheetName; Rows = $R; FirstUnique = $firstUnique }
+}

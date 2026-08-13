@@ -176,6 +176,28 @@ if (-not $usingReal) {
     Ok ($book.SavedFormat -eq 51) 'engine backup saved as .xlsx (fmt 51)'
 }
 
+# ============================================================================
+Write-Host "`n== E. Report sheet (flags + unique addresses, idempotent) ==" -ForegroundColor Cyan
+# ============================================================================
+if ($usingReal) { $rwb = $excel.Workbooks.Add() } else { $rwb = $excel.Workbooks.Add() }
+$flagRows = @([pscustomobject]@{Flag='OK';Count=57;Pct=49.1}, [pscustomobject]@{Flag='NO MATCH';Count=20;Pct=17.2})
+$uniqueRows = @(
+    [pscustomobject]@{Address='2225 Q St'; City='Aurora'; Zip=68818; Code=0; Flag='OK'; Count=8},
+    [pscustomobject]@{Address='1414 Mankin St'; City='Aurora'; Zip=68818; Code=$null; Flag='NO MATCH'; Count=1})
+$rep = New-NeReport $excel $rwb 'Report' $flagRows $uniqueRows '000'
+$rsh = $null; foreach ($s in $rwb.Worksheets) { if ($s.Name -eq 'Report') { $rsh = $s } }
+Ok ($null -ne $rsh) 'Report sheet created'
+Eq $rsh.Cells(1,1).Value2 'City Code Report' 'report title'
+Eq $rsh.Cells(6,1).Value2 'OK' 'first flag row label'
+Eq $rsh.Cells(6,2).Value2 57 'first flag row count'
+$fu = $rep.FirstUnique
+Eq $rsh.Cells($fu,1).Value2 '2225 Q St' 'first unique address'
+Eq $rsh.Cells($fu,4).Value2 0 'first unique code'
+Eq $rsh.Cells($fu,6).Value2 8 'first unique count'
+$null = New-NeReport $excel $rwb 'Report' $flagRows $uniqueRows '000'
+$rc = 0; foreach ($s in $rwb.Worksheets) { if ($s.Name -eq 'Report') { $rc++ } }
+Eq $rc 1 'Report is idempotent (re-run replaces, not duplicates)'
+
 # ---- cleanup real Excel ----
 if ($usingReal) { try { $realApp.Quit() } catch {} }
 Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
