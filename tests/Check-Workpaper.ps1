@@ -1,7 +1,7 @@
 <#
 ================================================================================
  Check-Workpaper.ps1  -  scan a finished workpaper for the "scramble" defect,
- using Excel COM (Windows). Same idea as Check-Workpaper.py, no Python needed.
+ using Excel COM (Windows). PowerShell only.
 
    powershell -File .\tests\Check-Workpaper.ps1 -Path ".\Working Paper.xlsx" `
               -HeaderRow 4 -CodeCol "NE City Code" -FlagCol "Match Flag"

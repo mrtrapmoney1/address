@@ -91,10 +91,10 @@ the main script. `tests/Test-Paste.ps1` runs those *same* functions against a
 throwaway workbook — real Excel if present, otherwise a faithful COM mock
 (`tests/ExcelMock.ps1`) — and reads every cell back to check append vs insert,
 per-row alignment across chunk boundaries, no-overwrite, the `000` format, and
-the value-pasted per-quarter engine backup. `tests/Check-Workpaper.py` (and a
-`.ps1` twin) scan a *finished* paper for the scramble signature and invalid
-codes; run on the sample they flag the old file's 63 scrambled + 24 invalid
-rows and pass the fixed one.
+the value-pasted per-quarter engine backup. `tests/Check-Workpaper.ps1` scans a
+*finished* paper (via Excel COM) for the scramble signature and invalid codes;
+run on the sample it flags the old file's 63 scrambled + 24 invalid rows and
+passes the fixed one. Everything is PowerShell — no Python.
 
 **A real bug the paste test caught before shipping:** in PowerShell `@($array)`
 *flattens*, so the code-only path (`$columns = @($finalCode)`) silently arrived

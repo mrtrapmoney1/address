@@ -117,10 +117,10 @@ SETTINGS  (top of Get-NeTaxCode.ps1)
   $CodeNumberFormat '000' (three digits). 'General' shows 94 and 0
   $NoCodeCityZero   $false = NO CODE-CITY code left blank; $true = 0
 
-VERIFY IT  (tests\)
--------------------
+VERIFY IT  (tests\ - all PowerShell)
+------------------------------------
   pwsh -File tests\Run-AllTests.ps1        logic + paste tests (green = good)
-  python tests\Check-Workpaper.py ".\Working Paper.xlsx" --header-row 4
+  pwsh -File tests\Check-Workpaper.ps1 -Path ".\Working Paper.xlsx" -HeaderRow 4
                                            scan a finished paper for scramble/bad codes
 See tests\README.md for what each one checks.
 
