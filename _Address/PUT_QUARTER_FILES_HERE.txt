@@ -1,0 +1,3 @@
+Put the quarterly Nebraska state files here, e.g.:
+  2021 Q3 Address Data.xlsx
+The script auto-detects the 'YYYY QX' in each filename.

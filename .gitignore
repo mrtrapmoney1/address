@@ -1,0 +1,12 @@
+# The engine template is large (~25 MB) and is the user's own file.
+/Address_Tax_Engine.xlsx
+/samples/Address_Tax_Engine.xlsx
+
+# Quarterly state files and generated backups (runtime only)
+/_Address/*.xlsx
+/_Backups/*.xlsx
+/_Engine_last_run*.xlsx
+/_Results_check.csv
+
+# Excel lock files
+~$*
