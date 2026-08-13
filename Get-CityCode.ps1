@@ -44,12 +44,13 @@ $ReadChunk = 200000        # bigger chunks = far fewer COM round-trips
 $xlCalcManual = -4135; $xlCalcAutomatic = -4105
 
 $folder = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { (Get-Location).Path }
-foreach ($lib in @('NeDicts.ps1','NeMatch.ps1','NeTaxPaste.ps1')) {
+foreach ($lib in @('NeDicts.ps1','NeMatch.ps1','NeTaxPaste.ps1','NeXlsx.ps1')) {
     $p = Join-Path $folder $lib
     if (-not (Test-Path -LiteralPath $p)) { Write-Host "Missing required file: $lib" -ForegroundColor Red; if (-not $NonInteractive) { Read-Host '  Press Enter to close' }; exit 1 }
 }
 . (Join-Path $folder 'NeMatch.ps1')       # also dot-sources NeDicts.ps1
 . (Join-Path $folder 'NeTaxPaste.ps1')
+. (Join-Path $folder 'NeXlsx.ps1')
 
 $script:Phase = 0
 function WrHead($t) {
@@ -266,67 +267,43 @@ if ($groups.Count -eq 0) { WrWarn 'No rows matched a quarterly file.' } else { f
 # ============================================================================
 WrHead 'Matching against the tax data'
 
-# FAST PATH: pulling ~300k x 7 cells out of Excel one range at a time costs
-# minutes (COM marshals every cell). Instead we have Excel write the sheet out
-# once as a tab-delimited file and read that with .NET - typically 10-50x
-# faster - and keep it in _Cache so later runs skip the export completely.
-# Returns $null if anything goes wrong, so the caller falls back to COM.
+# FAST PATH: an .xlsx is a zip of XML, so we read the quarterly file directly
+# (NeXlsx.ps1) instead of marshalling ~2 million cells through Excel COM.
+# Measured on a 300,000-row file: 3.5 seconds, against 411 seconds via COM.
+# Returns $null on any problem so the caller falls back to the COM reader.
 function Read-QuarterFast($path) {
-    $cacheDir = Join-Path $folder '_Cache'
-    if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir | Out-Null }
-    $tsv = Join-Path $cacheDir ([IO.Path]::GetFileNameWithoutExtension($path) + '.txt')
-    $src = Get-Item -LiteralPath $path
-    $fresh = (Test-Path -LiteralPath $tsv) -and ((Get-Item -LiteralPath $tsv).LastWriteTimeUtc -ge $src.LastWriteTimeUtc)
-    if (-not $fresh) {
-        WrStep '      exporting tax file to a fast cache (one time per file)...'
-        Write-Progress -Activity 'Exporting tax data' -Status 'Excel is writing the cache file...' -PercentComplete 30
-        $xlUnicodeText = 42
-        $qwb = $excel.Workbooks.Open($src.FullName, 0, $true)
-        try {
-            $qwb.Worksheets.Item(1).Copy()          # new workbook holding just that sheet
-            $tmpWb = $excel.ActiveWorkbook
-            $tmpWb.SaveAs($tsv, $xlUnicodeText)
-            $tmpWb.Close($false)
-        } finally { $qwb.Close($false) }
-        Write-Progress -Activity 'Exporting tax data' -Completed
-    } else { WrStep '      using cached tax data (delete _Cache to force a refresh)' }
+    if ([IO.Path]::GetExtension($path).ToLower() -ne '.xlsx') { return $null }
+    # slots:            0     1     2     3(street)  4     5(concat) 6(key) 7(code)
+    $cols = @(3, 4, 5, 7, 8, 23, 24, 25)
+    $d = Read-NeXlsxColumns -Path $path -Columns $cols
+    if ($d.Count -lt 2) { return $null }
 
-    # ---- read the tab file with .NET ----
-    $need = @{ lo = 2; hi = 3; e = 4; h = 7; concat = 22; key = 23; code = 24 }   # 0-based
-    $lines = New-Object 'System.Collections.Generic.List[string]'
-    $sr = New-Object System.IO.StreamReader($tsv, [System.Text.Encoding]::Unicode)
-    try { while ($null -ne ($ln = $sr.ReadLine())) { $lines.Add($ln) } } finally { $sr.Dispose() }
-    if ($lines.Count -lt 2) { return $null }
-
-    # header row: column G (index 6) says "Street Name"
     $hdrIdx = -1
-    for ($i = 0; $i -lt [Math]::Min(5, $lines.Count); $i++) {
-        $f = $lines[$i].Split("`t")
-        if ($f.Count -gt 6 -and $f[6] -and $f[6].ToUpper().Contains('STREET')) { $hdrIdx = $i; break }
+    for ($i = 0; $i -lt [Math]::Min(5, $d.Count); $i++) {
+        $sn = [string]$d.Rows[$i][3]
+        if ($sn -and $sn.ToUpper().Contains('STREET')) { $hdrIdx = $i; break }
     }
     if ($hdrIdx -lt 0) { return $null }
-    $hf = $lines[$hdrIdx].Split("`t")
-    if ($hf.Count -gt 24 -and $hf[24] -and -not $hf[24].ToUpper().Contains('CITY CODE')) {
-        throw "column Y of $(Split-Path $path -Leaf) is '$($hf[24])', not 'City Code (final)'"
+    $cc = [string]$d.Rows[$hdrIdx][7]
+    if ($cc -and -not $cc.ToUpper().Contains('CITY CODE')) {
+        throw "column Y of $(Split-Path $path -Leaf) is '$cc', not 'City Code (final)'"
     }
 
-    $qn = $lines.Count - $hdrIdx - 1
+    $qn = $d.Count - $hdrIdx - 1
     if ($qn -lt 1) { return $null }
-    $res = @{ n = $qn; dr = (New-Object 'object[]' $qn); key = (New-Object 'object[]' $qn)
-        lo = (New-Object 'object[]' $qn); hi = (New-Object 'object[]' $qn); e = (New-Object 'object[]' $qn)
-        h = (New-Object 'object[]' $qn); code = (New-Object 'object[]' $qn); concat = $null }
+    $res = @{ n = $qn
+        dr = (New-Object 'object[]' $qn); key = (New-Object 'object[]' $qn)
+        lo = (New-Object 'object[]' $qn); hi = (New-Object 'object[]' $qn)
+        e  = (New-Object 'object[]' $qn); h  = (New-Object 'object[]' $qn)
+        code = (New-Object 'object[]' $qn); concat = $null }
     if ($anyZip9) { $res.concat = New-Object 'object[]' $qn }
     for ($i = 0; $i -lt $qn; $i++) {
-        $f = $lines[$hdrIdx + 1 + $i].Split("`t")
+        $row = $d.Rows[$hdrIdx + 1 + $i]
         $res.dr[$i] = $hdrIdx + 2 + $i
-        if ($f.Count -gt $need.key)  { $res.key[$i]  = $f[$need.key] }
-        if ($f.Count -gt $need.lo)   { $res.lo[$i]   = $f[$need.lo] }
-        if ($f.Count -gt $need.hi)   { $res.hi[$i]   = $f[$need.hi] }
-        if ($f.Count -gt $need.e)    { $res.e[$i]    = $f[$need.e] }
-        if ($f.Count -gt $need.h)    { $res.h[$i]    = $f[$need.h] }
-        if ($f.Count -gt $need.code) { $res.code[$i] = $f[$need.code] }
-        if ($null -ne $res.concat -and $f.Count -gt $need.concat) { $res.concat[$i] = $f[$need.concat] }
-        if (($i % 50000) -eq 0) { Write-Progress -Activity 'Reading tax data' -Status ("{0:N0} / {1:N0}" -f $i, $qn) -PercentComplete (100 * $i / $qn) }
+        $res.lo[$i] = $row[0]; $res.hi[$i] = $row[1]; $res.e[$i] = $row[2]
+        $res.h[$i] = $row[4]; $res.key[$i] = $row[6]; $res.code[$i] = $row[7]
+        if ($null -ne $res.concat) { $res.concat[$i] = $row[5] }
+        if (($i % 50000) -eq 0 -and $qn -gt 50000) { Write-Progress -Activity 'Reading tax data' -Status ("{0:N0} / {1:N0}" -f $i, $qn) -PercentComplete (100 * $i / $qn) }
     }
     Write-Progress -Activity 'Reading tax data' -Completed
     return $res
@@ -406,68 +383,61 @@ foreach ($q in ($groups.Keys | Sort-Object)) {
     $nU = $uAddr.Count
     WrStep ("      {0,10:N0} distinct address(es)   ({1:N1}s)" -f $nU, ((Get-Date) - $tA).TotalSeconds)
 
-    # ---- 2. parse them once, and work out which tax keys we actually need ----
+    # ---- 2. parse each distinct address once (cheap; no repair work yet) ----
     $tB = Get-Date
     $parses = New-Object 'object[]' $nU
-    $parses2 = New-Object 'object[]' $nU      # repaired variant (or $null)
-    $notes2 = New-Object 'string[]' $nU
-    $needK = New-Object 'System.Collections.Generic.HashSet[string]'
     $needZ = New-Object 'System.Collections.Generic.HashSet[string]'
     for ($u = 0; $u -lt $nU; $u++) {
         $p = Get-NeParse $uAddr[$u] $uCity[$u] $uZip[$u]
         $parses[$u] = $p
-        if ($p.W -ne '') { [void]$needK.Add($p.W + ' ' + $p.V) }
         if ($p.Plus4 -ne '') { [void]$needZ.Add($p.V + $p.Plus4 + '_') }
-        $rep = Repair-NeAddress $uAddr[$u]
-        if ($rep.Note) {
-            $p2 = Get-NeParse $rep.Text $uCity[$u] $uZip[$u]
-            $parses2[$u] = $p2; $notes2[$u] = $rep.Note
-            if ($p2.W -ne '') { [void]$needK.Add($p2.W + ' ' + $p2.V) }
-        }
-        if (($u % 2000) -eq 0 -and $nU -gt 2000) { Write-Progress -Activity "$q  -  parsing addresses" -Status ("{0:N0} / {1:N0}" -f $u, $nU) -PercentComplete (100 * $u / $nU) }
+        if (($u % 5000) -eq 0 -and $nU -gt 5000) { Write-Progress -Activity "$q  -  parsing addresses" -Status ("{0:N0} / {1:N0}" -f $u, $nU) -PercentComplete (100 * $u / $nU) }
     }
     Write-Progress -Activity "$q  -  parsing addresses" -Completed
-    WrStep ("      {0,10:N0} street key(s) needed     ({1:N1}s)" -f $needK.Count, ((Get-Date) - $tB).TotalSeconds)
+    WrStep ("      {0,10:N0} parsed                   ({1:N1}s)" -f $nU, ((Get-Date) - $tB).TotalSeconds)
 
-    # ---- 3. load the quarterly file ----
+    # ---- 3. load the quarterly file (direct .xlsx read; COM only as a fallback) ----
     $tC = Get-Date
     $qd = $null
     try { $qd = Read-QuarterFast $qMap[$q] }
-    catch { WrWarn "      fast read unavailable ($($_.Exception.Message)); using the slower COM read"; $qd = $null }
+    catch { WrWarn "      direct read unavailable ($($_.Exception.Message)); using Excel instead"; $qd = $null }
     if ($null -eq $qd) {
         try { $qd = Read-QuarterColumns $qMap[$q] } catch { WrDie "Quarter $q failed: $($_.Exception.Message)" }
     }
     WrStep ("      {0,10:N0} tax row(s) read          ({1:N1}s)" -f $qd.n, ((Get-Date) - $tC).TotalSeconds)
 
-    # ---- 4. index ONLY the keys this batch needs ----
+    # ---- 4. block index over the sorted key column ----
     $tD = Get-Date
-    Write-Progress -Activity "$q  -  indexing tax data" -Status "building lookup..." -PercentComplete 50
-    $codeArr = New-Object 'object[]' $qd.n
-    $cyd = 0.0
-    for ($i = 0; $i -lt $qd.n; $i++) { $codeArr[$i] = if ([double]::TryParse("$($qd.code[$i])", [ref]$cyd)) { [int]$cyd } else { $null } }
-    $index = New-NeIndex $qd.dr $qd.key $qd.lo $qd.hi $qd.e $qd.h $codeArr $qd.concat $needK $needZ
+    Write-Progress -Activity "$q  -  indexing tax data" -Status 'building lookup...' -PercentComplete 50
+    $index = New-NeIndex $qd.dr $qd.key $qd.lo $qd.hi $qd.e $qd.h $qd.code $qd.concat $needZ
     Write-Progress -Activity "$q  -  indexing tax data" -Completed
     $qd = $null
-    WrStep ("      {0,10:N0} street(s) indexed        ({1:N1}s)" -f $index.Map.Count, ((Get-Date) - $tD).TotalSeconds)
+    WrStep ("      {0,10:N0} street(s) indexed        ({1:N1}s)" -f $index.Blocks.Count, ((Get-Date) - $tD).TotalSeconds)
 
-    # ---- 5. match each distinct address once (with the fuzzy retry) ----
+    # ---- 5. match each distinct address; repair ONLY the ones that fail ----
     $tE = Get-Date
     $uCode = New-Object 'object[]' $nU
     $uFlag = New-Object 'string[]' $nU
-    $repaired = 0
+    $repaired = 0; $tried = 0
     for ($u = 0; $u -lt $nU; $u++) {
         $m = Find-NeCode $parses[$u] $index
-        if (($m.Flag -eq 'NO MATCH' -or $m.Flag -eq 'FALLBACK') -and $null -ne $parses2[$u]) {
-            $m2 = Find-NeCode $parses2[$u] $index
-            if ($m2.Flag -eq 'OK' -or $m2.Flag -eq 'ZIP9' -or ($m2.Flag -eq 'FALLBACK' -and $m.Flag -eq 'NO MATCH')) {
-                $m = @{ Code = $m2.Code; Flag = "$($m2.Flag) - REPAIRED: $($notes2[$u])" }; $repaired++
+        if ($m.Flag -eq 'NO MATCH' -or $m.Flag -eq 'FALLBACK') {
+            # lazy fuzzy repair - most addresses never need this, so doing it here
+            # instead of upfront saves the bulk of the parsing time
+            $tried++
+            $rep = Repair-NeAddress $uAddr[$u]
+            if ($rep.Note) {
+                $m2 = Find-NeCode (Get-NeParse $rep.Text $uCity[$u] $uZip[$u]) $index
+                if ($m2.Flag -eq 'OK' -or $m2.Flag -eq 'ZIP9' -or ($m2.Flag -eq 'FALLBACK' -and $m.Flag -eq 'NO MATCH')) {
+                    $m = @{ Code = $m2.Code; Flag = "$($m2.Flag) - REPAIRED: $($rep.Note)" }; $repaired++
+                }
             }
         }
         $uCode[$u] = $m.Code; $uFlag[$u] = $m.Flag
-        if (($u % 2000) -eq 0 -and $nU -gt 2000) { Write-Progress -Activity "$q  -  matching" -Status ("{0:N0} / {1:N0}" -f $u, $nU) -PercentComplete (100 * $u / $nU) }
+        if (($u % 5000) -eq 0 -and $nU -gt 5000) { Write-Progress -Activity "$q  -  matching" -Status ("{0:N0} / {1:N0}" -f $u, $nU) -PercentComplete (100 * $u / $nU) }
     }
     Write-Progress -Activity "$q  -  matching" -Completed
-    WrStep ("      {0,10:N0} matched{1}   ({2:N1}s)" -f $nU, $(if ($repaired) { " ($repaired fuzzy-repaired)" } else { '' }), ((Get-Date) - $tE).TotalSeconds)
+    WrStep ("      {0,10:N0} matched{1}   ({2:N1}s)" -f $nU, $(if ($tried) { " ($repaired of $tried repaired)" } else { '' }), ((Get-Date) - $tE).TotalSeconds)
 
     # ---- 6. fan the answers back out to every row ----
     $tF = Get-Date
@@ -478,7 +448,7 @@ foreach ($q in ($groups.Keys | Sort-Object)) {
     }
     Write-Progress -Activity "$q  -  applying to rows" -Completed
     WrGood ("      {0,10:N0} row(s) done              ({1:N1}s total for {2})" -f $qTot, ((Get-Date) - $tA).TotalSeconds, $q)
-    $index = $null; $parses = $null; $parses2 = $null; $uniqKeys = $null
+    $index = $null; $parses = $null; $uniqKeys = $null
     [System.GC]::Collect()
 }
 Write-Host ''

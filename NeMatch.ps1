@@ -109,15 +109,14 @@ function Test-NeOddEven([string]$e, $h) {
     return $false
 }
 
-# The index is FLAT typed arrays plus a Dictionary of key -> row positions.
-# (The old shape allocated one PSCustomObject per tax row - ~300k objects per
-# quarter - which is what made loading a quarter feel like a hang.)
-#   Map    : Dictionary[string, List[int]]  "STREET ZIP5" -> positions
-#   Lo/Hi  : int[]     (-1 when the file value is not a number)
-#   E/H    : string[]  (upper-cased once, here, not per comparison)
-#   Code   : the City Code (final) column, as read
-#   Dr     : the source data-row number, for reporting
-#   ByZip9 : Dictionary[string, int]  "zip5plus4_" -> position
+# The tax file is SORTED by the key column, so all rows sharing a key sit in one
+# contiguous block. The index is therefore just "key -> (start, count)" over the
+# raw column arrays: one pass, one dictionary entry per DISTINCT key, and no
+# per-row object or number parsing at all. The handful of rows in a matched
+# block are parsed on demand in Find-NeCode.
+#   Blocks : Dictionary[string,int[]]  key -> @(start, count)
+#   Lo/Hi/E/H/Code/Dr : the raw column arrays, as read
+#   ByZip9 : Dictionary[string,int]    "zip5plus4_" -> position
 function Find-NeCode($p, $index) {
     # ZIP9 (column AC) wins when the customer gave a 9-digit zip
     if ($p.Plus4 -ne '' -and $index.ByZip9.Count -gt 0) {
@@ -128,76 +127,70 @@ function Find-NeCode($p, $index) {
     }
     if (-not $p.CityOk) { return @{ Code = $null; Flag = 'NO CODE-CITY'; Row = $null } }
     if ($p.W -eq '') { return @{ Code = $null; Flag = 'NO MATCH'; Row = $null } }
-    $lst = $null
-    if (-not $index.Map.TryGetValue(($p.W + ' ' + $p.V), [ref]$lst)) { return @{ Code = $null; Flag = 'NO MATCH'; Row = $null } }
+    $blk = $null
+    if (-not $index.Blocks.TryGetValue(($p.W + ' ' + $p.V), [ref]$blk)) { return @{ Code = $null; Flag = 'NO MATCH'; Row = $null } }
+    $start = $blk[0]; $stop = $start + $blk[1] - 1
 
     $h = $p.House
     $ab = -1
     if ($null -ne $h) {
-        $odd = ($h % 2)
+        $odd = [int]($h % 2)
         $r = $p.R
+        $lo = [long]0; $hi = [long]0
         # pass 1: range + odd/even + suffix agrees (or either side blank). Keep the LAST.
-        foreach ($i in $lst) {
-            $lo = $index.Lo[$i]
-            if ($lo -lt 0 -or $h -lt $lo -or $h -gt $index.Hi[$i]) { continue }
-            $e = $index.E[$i]
+        for ($i = $start; $i -le $stop; $i++) {
+            if (-not [long]::TryParse([string]$index.Lo[$i], [ref]$lo)) { continue }
+            if (-not [long]::TryParse([string]$index.Hi[$i], [ref]$hi)) { continue }
+            if ($h -lt $lo -or $h -gt $hi) { continue }
+            $e = ([string]$index.E[$i]).ToUpper()
             if (-not ($e -eq 'B' -or $e -eq '' -or ($e -eq 'O' -and $odd -eq 1) -or ($e -eq 'E' -and $odd -eq 0))) { continue }
-            $sh = $index.H[$i]
+            $sh = ([string]$index.H[$i]).ToUpper()
             if ($sh -eq $r -or $r -eq '' -or $sh -eq '') { $ab = $i }
         }
         # pass 2 (fallback): same, ignoring the suffix
         if ($ab -lt 0) {
-            foreach ($i in $lst) {
-                $lo = $index.Lo[$i]
-                if ($lo -lt 0 -or $h -lt $lo -or $h -gt $index.Hi[$i]) { continue }
-                $e = $index.E[$i]
+            for ($i = $start; $i -le $stop; $i++) {
+                if (-not [long]::TryParse([string]$index.Lo[$i], [ref]$lo)) { continue }
+                if (-not [long]::TryParse([string]$index.Hi[$i], [ref]$hi)) { continue }
+                if ($h -lt $lo -or $h -gt $hi) { continue }
+                $e = ([string]$index.E[$i]).ToUpper()
                 if ($e -eq 'B' -or $e -eq '' -or ($e -eq 'O' -and $odd -eq 1) -or ($e -eq 'E' -and $odd -eq 0)) { $ab = $i }
             }
         }
     }
     if ($ab -ge 0) { return @{ Code = $index.Code[$ab]; Flag = 'OK'; Row = $index.Dr[$ab] } }
-    return @{ Code = 0; Flag = 'FALLBACK'; Row = $index.Dr[$lst[0]] }
+    return @{ Code = 0; Flag = 'FALLBACK'; Row = $index.Dr[$start] }
 }
 
-# Build the index from parallel arrays (as read from a quarterly file).
-# $neededKeys / $neededZip9 (optional HashSet[string]): when supplied, only rows
-# whose key is actually wanted by this batch are indexed. A quarter file has
-# ~300k rows but a workpaper usually needs a few hundred distinct streets, so
-# this is the difference between minutes and seconds.
-function New-NeIndex($dr, $key, $lo, $hi, $e, $h, $code, $concat, $neededKeys = $null, $neededZip9 = $null) {
+# Build the block index. $key MUST be the file's sorted key column (equal keys
+# contiguous) - that is how the quarterly files ship. $neededZip9 (optional
+# HashSet) limits the ZIP9 table to the plus4s this batch actually uses.
+function New-NeIndex($dr, $key, $lo, $hi, $e, $h, $code, $concat, $neededZip9 = $null) {
     $n = $key.Count
-    $map = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[int]]'
-    $z9  = New-Object 'System.Collections.Generic.Dictionary[string,int]'
-    $loA = New-Object 'long[]' $n
-    $hiA = New-Object 'long[]' $n
-    $eA  = New-Object 'string[]' $n
-    $hA  = New-Object 'string[]' $n
-    $filterK = ($null -ne $neededKeys -and $neededKeys.Count -gt 0)
-    $filterZ = ($null -ne $neededZip9 -and $neededZip9.Count -gt 0)
-    $lv = [long]0; $hv = [long]0
+    $blocks = New-Object 'System.Collections.Generic.Dictionary[string,int[]]'
+    $z9 = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+    $prev = $null; $blockStart = -1
     for ($i = 0; $i -lt $n; $i++) {
         $k = [string]$key[$i]
-        if ($k -ne '' -and ((-not $filterK) -or $neededKeys.Contains($k))) {
-            if ([long]::TryParse([string]$lo[$i], [ref]$lv)) { $loA[$i] = $lv } else { $loA[$i] = -1 }
-            if ([long]::TryParse([string]$hi[$i], [ref]$hv)) { $hiA[$i] = $hv } else { $hiA[$i] = -1 }
-            $eA[$i] = ([string]$e[$i]).ToUpper()
-            $hA[$i] = ([string]$h[$i]).ToUpper()
-            $lst = $null
-            if (-not $map.TryGetValue($k, [ref]$lst)) { $lst = New-Object 'System.Collections.Generic.List[int]'; $map[$k] = $lst }
-            $lst.Add($i)
-        }
-        if ($null -ne $concat) {
-            $w = [string]$concat[$i]
-            if ($w -ne '') {
-                $us = $w.IndexOf('_')
-                if ($us -ge 0) {
-                    $wk = $w.Substring(0, $us + 1)
-                    if (((-not $filterZ) -or $neededZip9.Contains($wk)) -and (-not $z9.ContainsKey($wk))) { $z9[$wk] = $i }
-                }
-            }
+        if ($k -ne $prev) {
+            if ($null -ne $prev -and $prev -ne '' -and -not $blocks.ContainsKey($prev)) { $blocks[$prev] = @($blockStart, ($i - $blockStart)) }
+            $prev = $k; $blockStart = $i
         }
     }
-    return @{ Map = $map; ByZip9 = $z9; Lo = $loA; Hi = $hiA; E = $eA; H = $hA; Code = $code; Dr = $dr }
+    if ($null -ne $prev -and $prev -ne '' -and -not $blocks.ContainsKey($prev)) { $blocks[$prev] = @($blockStart, ($n - $blockStart)) }
+
+    if ($null -ne $concat) {
+        $filterZ = ($null -ne $neededZip9 -and $neededZip9.Count -gt 0)
+        for ($i = 0; $i -lt $n; $i++) {
+            $w = [string]$concat[$i]
+            if ($w -eq '') { continue }
+            $us = $w.IndexOf('_')
+            if ($us -lt 0) { continue }
+            $wk = $w.Substring(0, $us + 1)
+            if (((-not $filterZ) -or $neededZip9.Contains($wk)) -and (-not $z9.ContainsKey($wk))) { $z9[$wk] = $i }
+        }
+    }
+    return @{ Blocks = $blocks; ByZip9 = $z9; Lo = $lo; Hi = $hi; E = $e; H = $h; Code = $code; Dr = $dr }
 }
 
 # ============================================================================
