@@ -159,6 +159,20 @@ if ($colDate -eq 0) {
 $assumeNE = $false
 if ($colState -eq 0) { if ($NonInteractive) { $assumeNE = $true } else { $a = Read-Host '  No state column. Treat EVERY row as Nebraska? (Y/N)'; if ($a -match '^[Yy]') { $assumeNE = $true } else { WrDie 'A state column is needed.' } } }
 
+# ---- true last data row (guard against UsedRange bloat, common in .xlsb / heavily
+#      formatted sheets, where UsedRange can claim ~1,048,576 rows). Use the real
+#      bottom of the ADDRESS column instead so we don't read a million blank rows. ----
+$xlUp = -4162
+try {
+    $sheetRowCount = [int]$ws.Rows.Count
+    $lastByAddr = [int]$ws.Cells($sheetRowCount, $colAddr).End($xlUp).Row
+    if ($lastByAddr -ge $firstDataRow -and $lastByAddr -lt $lastRow) {
+        WrWarn ("UsedRange claimed {0:N0} rows; real data ends at row {1:N0}. Using the smaller." -f $lastRow, $lastByAddr)
+        $lastRow = $lastByAddr; $nRows = $lastRow - $firstDataRow + 1
+    }
+} catch { }
+WrGood ("Will process {0:N0} data row(s)." -f $nRows)
+
 # ---- output options ----
 Write-Host ''
 Write-Host '  Result: press ENTER to append at the end, or type a column (e.g. T) to INSERT there.' -ForegroundColor White
@@ -182,17 +196,29 @@ WrGood "Backup: _Backups\$(Split-Path $bak -Leaf)"
 
 # ============================================================================
 WrHead 'Reading the workpaper'
-function Read-Col([int]$col) {
+# Bulk column read. Excel hands back a whole chunk's .Value2 as one 2-D array in
+# a single COM call; we flatten it with Array.Copy (native, fast) instead of a
+# per-cell reflection loop, which is what made a big .xlsb crawl.
+function Read-Col([int]$col, [string]$label) {
     $out = New-Object 'string[]' $nRows; $done = 0
-    while ($done -lt $nRows) { $take = [Math]::Min($ReadChunk, $nRows - $done); $r1 = $firstDataRow + $done; $r2 = $r1 + $take - 1
+    while ($done -lt $nRows) {
+        $take = [Math]::Min($ReadChunk, $nRows - $done); $r1 = $firstDataRow + $done; $r2 = $r1 + $take - 1
         $vals = $ws.Range($ws.Cells($r1, $col), $ws.Cells($r2, $col)).Value2
-        for ($i = 1; $i -le $take; $i++) { $v = Get-Nth $vals $i; $out[$done + $i - 1] = if ($null -eq $v) { '' } else { [string]$v } }
-        $done += $take }
+        if ($take -eq 1) { $out[$done] = if ($null -eq $vals) { '' } else { [string]$vals } }
+        else {
+            $flat = New-Object 'object[]' $take
+            try { [Array]::Copy($vals, $flat, $take) } catch { for ($i = 1; $i -le $take; $i++) { $flat[$i - 1] = Get-Nth $vals $i } }
+            for ($i = 0; $i -lt $take; $i++) { $v = $flat[$i]; $out[$done + $i] = if ($null -eq $v) { '' } else { [string]$v } }
+        }
+        $done += $take
+        if ($nRows -ge 20000) { Write-Progress -Activity "Reading $label" -Status ("{0:N0} / {1:N0}" -f $done, $nRows) -PercentComplete (100 * $done / $nRows) }
+    }
+    Write-Progress -Activity "Reading $label" -Completed
     return , $out
 }
-$aAddr = Read-Col $colAddr; $aCity = Read-Col $colCity; $aZip = Read-Col $colZip
-$aDate = if ($colDate -gt 0) { Read-Col $colDate } else { $null }
-$aState = if ($assumeNE) { $null } else { Read-Col $colState }
+$aAddr = Read-Col $colAddr 'address'; $aCity = Read-Col $colCity 'city'; $aZip = Read-Col $colZip 'zip'
+$aDate = if ($colDate -gt 0) { Read-Col $colDate 'date' } else { $null }
+$aState = if ($assumeNE) { $null } else { Read-Col $colState 'state' }
 WrGood "Read $nRows row(s)."
 
 # ============================================================================
@@ -218,7 +244,9 @@ for ($i = 0; $i -lt $nRows; $i++) {
     if (($aZip[$i] -replace '[^0-9]', '').Length -ge 9) { $anyZip9 = $true }
     if (-not $groups.ContainsKey($q)) { $groups[$q] = New-Object 'System.Collections.Generic.List[int]' }
     $groups[$q].Add($i)
+    if ($nRows -ge 20000 -and ($i % 50000) -eq 0) { Write-Progress -Activity 'Grouping rows into quarters' -PercentComplete (100 * $i / $nRows) -Status ("{0:N0} / {1:N0}" -f $i, $nRows) }
 }
+Write-Progress -Activity 'Grouping rows into quarters' -Completed
 if ($groups.Count -eq 0) { WrWarn 'No rows matched a quarterly file.' } else { foreach ($k in ($groups.Keys | Sort-Object)) { WrStep ("{0}  ->  {1,8:N0} row(s)" -f $k, $groups[$k].Count) } }
 
 # ============================================================================
@@ -236,10 +264,17 @@ function Read-QuarterColumns($path) {
         if ($qn -lt 1) { throw "no data rows in $(Split-Path $path -Leaf)" }
         function RdCol([int]$col) {
             $arr = New-Object 'object[]' $qn; $done = 0
-            while ($done -lt $qn) { $take = [Math]::Min($ReadChunk, $qn - $done); $r1 = $qFirst + $done; $r2 = $r1 + $take - 1
+            while ($done -lt $qn) {
+                $take = [Math]::Min($ReadChunk, $qn - $done); $r1 = $qFirst + $done; $r2 = $r1 + $take - 1
                 $vals = $qws.Range($qws.Cells($r1, $col), $qws.Cells($r2, $col)).Value2
-                for ($i = 1; $i -le $take; $i++) { $arr[$done + $i - 1] = Get-Nth $vals $i }
-                $done += $take }
+                if ($take -eq 1) { $arr[$done] = $vals }
+                else {
+                    $flat = New-Object 'object[]' $take
+                    try { [Array]::Copy($vals, $flat, $take) } catch { for ($i = 1; $i -le $take; $i++) { $flat[$i - 1] = Get-Nth $vals $i } }
+                    [Array]::Copy($flat, 0, $arr, $done, $take)
+                }
+                $done += $take
+            }
             return , $arr
         }
         $dr = New-Object 'object[]' $qn; for ($i = 0; $i -lt $qn; $i++) { $dr[$i] = $qFirst + $i }
@@ -259,24 +294,33 @@ foreach ($q in ($groups.Keys | Sort-Object)) {
     for ($i = 0; $i -lt $qd.n; $i++) { $cy = 0.0; $codeArr[$i] = if ([double]::TryParse("$($qd.code[$i])", [ref]$cy)) { [int]$cy } else { $null } }
     $index = New-NeIndex $qd.dr $qd.key $qd.lo $qd.hi $qd.e $qd.h $codeArr $qd.concat
     WrStep ("      {0:N0} tax rows in {1:N1}s; matching {2:N0} address(es)..." -f $qd.n, ((Get-Date) - $t0).TotalSeconds, $groups[$q].Count)
-    $repaired = 0
+    $repaired = 0; $cache = @{}; $qTot = $groups[$q].Count; $qDone = 0; $t2 = Get-Date
     foreach ($ri in $groups[$q]) {
-        $p = Get-NeParse $aAddr[$ri] $aCity[$ri] $aZip[$ri]
-        $m = Find-NeCode $p $index
-        # PASS 2 - fuzzy repair only on rows that failed
-        if ($m.Flag -eq 'NO MATCH' -or $m.Flag -eq 'FALLBACK') {
-            $rep = Repair-NeAddress $aAddr[$ri]
-            if ($rep.Note) {
-                $p2 = Get-NeParse $rep.Text $aCity[$ri] $aZip[$ri]
-                $m2 = Find-NeCode $p2 $index
-                $better = ($m2.Flag -eq 'OK' -or $m2.Flag -eq 'ZIP9' -or ($m2.Flag -eq 'FALLBACK' -and $m.Flag -eq 'NO MATCH'))
-                if ($better) { $m = @{ Code = $m2.Code; Flag = "$($m2.Flag) - REPAIRED: $($rep.Note)" }; $repaired++ }
+        # Sales data repeats the same store addresses thousands of times - match each
+        # DISTINCT address+city+zip once and reuse the answer. This is the big speed-up.
+        $ckey = $aAddr[$ri] + '|' + $aCity[$ri] + '|' + $aZip[$ri]
+        $m = $cache[$ckey]
+        if ($null -eq $m) {
+            $p = Get-NeParse $aAddr[$ri] $aCity[$ri] $aZip[$ri]
+            $m = Find-NeCode $p $index
+            if ($m.Flag -eq 'NO MATCH' -or $m.Flag -eq 'FALLBACK') {
+                $rep = Repair-NeAddress $aAddr[$ri]
+                if ($rep.Note) {
+                    $p2 = Get-NeParse $rep.Text $aCity[$ri] $aZip[$ri]
+                    $m2 = Find-NeCode $p2 $index
+                    $better = ($m2.Flag -eq 'OK' -or $m2.Flag -eq 'ZIP9' -or ($m2.Flag -eq 'FALLBACK' -and $m.Flag -eq 'NO MATCH'))
+                    if ($better) { $m = @{ Code = $m2.Code; Flag = "$($m2.Flag) - REPAIRED: $($rep.Note)" }; $repaired++ }
+                }
             }
+            $cache[$ckey] = $m
         }
         $finalCode[$ri] = $m.Code; $finalFlag[$ri] = $m.Flag
+        $qDone++
+        if (($qDone % 5000) -eq 0) { Write-Progress -Activity "Matching $q" -Status ("{0:N0} / {1:N0}  ({2:N0} unique)" -f $qDone, $qTot, $cache.Count) -PercentComplete (100 * $qDone / $qTot) }
     }
-    if ($repaired -gt 0) { WrStep ("      fuzzy repair recovered {0:N0} address(es)" -f $repaired) }
-    $index = $null; [System.GC]::Collect()
+    Write-Progress -Activity "Matching $q" -Completed
+    WrStep ("      matched {0:N0} row(s) via {1:N0} unique address(es) in {2:N1}s{3}" -f $qTot, $cache.Count, ((Get-Date) - $t2).TotalSeconds, $(if ($repaired) { "; fuzzy-repaired $repaired" } else { '' }))
+    $index = $null; $cache = $null; [System.GC]::Collect()
 }
 WrGood 'Matching complete.'
 

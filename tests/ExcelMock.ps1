@@ -39,6 +39,7 @@ function New-MockSheet([string]$name) {
     $sheet | Add-Member ScriptMethod _fmtset { param($r, $c, $f) $this._fmt["$r,$c"] = $f }
     $sheet | Add-Member ScriptMethod _fmtget { param($r, $c) $k = "$r,$c"; if ($this._fmt.ContainsKey($k)) { $this._fmt[$k] } else { 'General' } }
     $sheet | Add-Member ScriptMethod Cells { param($r, $c) New-MockCell $this $r $c }
+    $sheet | Add-Member ScriptProperty Rows { [pscustomobject]@{ Count = 1048576 } }
     $sheet | Add-Member ScriptMethod Range { param($a, $b) New-MockRange $this $a.Row $a.Col $b.Row $b.Col }
     $sheet | Add-Member ScriptMethod Columns { param($n) New-MockColumn $this $n }
     $sheet | Add-Member ScriptMethod Delete { if ($this._owner) { $this._owner.Remove($this) } }
@@ -56,6 +57,13 @@ function New-MockSheet([string]$name) {
 function New-MockCell($sheet, [int]$r, [int]$c) {
     $cell = [pscustomobject]@{ Row = $r; Col = $c; _sheet = $sheet }
     $cell | Add-Member ScriptProperty Value2 { $this._sheet._get($this.Row, $this.Col) } { param($v) $this._sheet._set($this.Row, $this.Col, $v) }
+    # End(xlUp = -4162): bottom-most non-empty row in this column at or above this.Row.
+    $cell | Add-Member ScriptMethod End {
+        param($dir)
+        $best = 1
+        foreach ($k in $this._sheet._cells.Keys) { $rc = $k -split ','; $rr = [int]$rc[0]; $cc = [int]$rc[1]; if ($cc -eq $this.Col -and $rr -le $this.Row -and $rr -gt $best) { $best = $rr } }
+        return (New-MockCell $this._sheet $best $this.Col)
+    }
     return $cell
 }
 

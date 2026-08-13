@@ -94,7 +94,9 @@ function Write-ColumnValues {
         $r1 = $firstDataRow + $done; $r2 = $r1 + $take - 1
         $ws.Range($ws.Cells($r1, $col), $ws.Cells($r2, $col)).Value2 = $blk
         $done += $take
+        if ($nRows -ge 20000) { Write-Progress -Activity 'Writing results' -PercentComplete (100 * $done / $nRows) -Status ("{0:N0} / {1:N0}" -f $done, $nRows) }
     }
+    if ($nRows -ge 20000) { Write-Progress -Activity 'Writing results' -Completed }
 }
 
 # Write the whole result block: header + one column per array in $columns.
