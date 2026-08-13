@@ -54,6 +54,19 @@ Eq (Get-NeCityKey "O'Neill")    'ONEILL' "O'Neill -> ONEILL"
 Ok ((Get-NeParse '1 Main St' 'Saint Paul' '68873').CityOk) 'Saint Paul is a taxing city'
 Ok ((Get-NeParse '1 Main St' 'St Paul' '68873').CityOk)    'St Paul is a taxing city'
 
+Write-Host "`n== ZIP9 (9-digit zip; concat = zip5 plus4 _ [code]) ==" -ForegroundColor Cyan
+# concat has a code appended on the taxing row, none on the base row
+$zdr=@(101,102,103); $zkey=@('POTTER 68007','POTTER 68007','MAIN 68791')
+$zlo=@(17100,17200,200); $zhi=@(17199,17299,299); $ze=@('B','B','B'); $zh=@('ST','ST','RD')
+$zcode=@(0,0,530); $zconcat=@('680071678_','680071680_','687913029_530')
+$zidx = New-NeIndex $zdr $zkey $zlo $zhi $ze $zh $zcode $zconcat
+$r = Find-NeCode (Get-NeParse '200 Main Rd' 'Wisner' '687913029') $zidx
+Eq $r.Flag 'ZIP9' 'coded concat (687913029_530) -> ZIP9'; Eq $r.Code 530 '  code 530 (the _* wildcard finds it)'
+$r = Find-NeCode (Get-NeParse '17150 Potter St' 'Bennington' '680071678') $zidx
+Eq $r.Flag 'ZIP9' 'uncoded concat (680071678_) -> ZIP9'
+$r = Find-NeCode (Get-NeParse '17150 Potter St' 'Bennington' '68007') $zidx
+Eq $r.Flag 'OK' '5-digit zip (no plus4) -> street match, not ZIP9'
+
 Write-Host "`n== fuzzy repair ==" -ForegroundColor Cyan
 Eq (Repair-NeAddress '150 MAIN STREE').Text '150 MAIN ST' 'misspelled suffix repaired'
 Eq (Repair-NeAddress '100 MAIN ST N').Text '100 N MAIN ST' 'direction moved to front'

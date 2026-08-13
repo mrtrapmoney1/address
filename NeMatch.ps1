@@ -150,8 +150,16 @@ function New-NeIndex($dr, $key, $lo, $hi, $e, $h, $code, $concat) {
             $lst.Add($rec)
         }
         if ($null -ne $concat) {
+            # Concat zip is "zip5 plus4 _ [citycode]" e.g. 687913029_530 or 680071677_.
+            # The engine matches it as V&plus4&"_*" (wildcard after the underscore),
+            # so we key on the "zip5plus4_" PREFIX only - NOT the full string, which
+            # would miss every row that has a code appended.
             $w = "" + $concat[$i]
-            if ($w -ne '' -and -not $byZip9.ContainsKey($w)) { $byZip9[$w] = [pscustomobject]@{ Dr = $dr[$i]; Code = $code[$i] } }
+            $us = $w.IndexOf('_')
+            if ($us -ge 0) {
+                $wk = $w.Substring(0, $us + 1)
+                if (-not $byZip9.ContainsKey($wk)) { $byZip9[$wk] = [pscustomobject]@{ Dr = $dr[$i]; Code = $code[$i] } }
+            }
         }
     }
     return @{ ByKey = $byKey; ByZip9 = $byZip9 }
