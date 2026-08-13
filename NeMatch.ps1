@@ -85,16 +85,20 @@ function Get-NeParse([string]$rawAddr, [string]$rawCity, [string]$rawZip) {
     elseif ($T -match '^\d+$') { $W = Get-NeOrdinal ([int]$T) }
     else { $W = $T }
     $Plus4 = if ($zdig.Length -ge 9) { $zdig.Substring(5, 4) } else { '' }
-    $House = if ($S -match '^\d+$') { [int]$S } else { $null }
+    # House numbers can exceed Int32 in raw sales data (e.g. 3194158696),
+    # so parse as Int64 and simply leave it null if it still won't fit.
+    $House = $null
+    if ($S -match '^\d+$') { $hv64 = [long]0; if ([long]::TryParse($S, [ref]$hv64)) { $House = $hv64 } }
     return [pscustomobject]@{ House = $House; W = $W; R = $R; U = $U; V = $V; Plus4 = $Plus4; CityOk = $script:NeCities.ContainsKey((Get-NeCityKey $U)) }
 }
 
 # ---- the match (columns Z/AA/AB and F/G/H) --------------------------------
+# Kept for compatibility / readability; the hot path below inlines these.
 function Test-NeRange($lo, $hi, $h) {
     if ($null -eq $h) { return $false }
-    $loi = 0; $hii = 0
-    if (-not [int]::TryParse("$lo", [ref]$loi)) { return $false }
-    if (-not [int]::TryParse("$hi", [ref]$hii)) { return $false }
+    $loi = [long]0; $hii = [long]0
+    if (-not [long]::TryParse("$lo", [ref]$loi)) { return $false }
+    if (-not [long]::TryParse("$hi", [ref]$hii)) { return $false }
     return ($h -ge $loi -and $h -le $hii)
 }
 function Test-NeOddEven([string]$e, $h) {
@@ -105,64 +109,95 @@ function Test-NeOddEven([string]$e, $h) {
     return $false
 }
 
-# $index: @{ ByKey = @{ "W V" -> List[pscustomobject Dr,Lo,Hi,E,H,Code] };
-#            ByZip9 = @{ "zip5plus4_" -> pscustomobject Dr,Code } }
+# The index is FLAT typed arrays plus a Dictionary of key -> row positions.
+# (The old shape allocated one PSCustomObject per tax row - ~300k objects per
+# quarter - which is what made loading a quarter feel like a hang.)
+#   Map    : Dictionary[string, List[int]]  "STREET ZIP5" -> positions
+#   Lo/Hi  : int[]     (-1 when the file value is not a number)
+#   E/H    : string[]  (upper-cased once, here, not per comparison)
+#   Code   : the City Code (final) column, as read
+#   Dr     : the source data-row number, for reporting
+#   ByZip9 : Dictionary[string, int]  "zip5plus4_" -> position
 function Find-NeCode($p, $index) {
-    # ZIP9 (column AC) takes precedence when the customer gave a 9-digit zip
+    # ZIP9 (column AC) wins when the customer gave a 9-digit zip
     if ($p.Plus4 -ne '' -and $index.ByZip9.Count -gt 0) {
-        $zk = $p.V + $p.Plus4 + '_'
-        if ($index.ByZip9.ContainsKey($zk)) { $z = $index.ByZip9[$zk]; return @{ Code = $z.Code; Flag = 'ZIP9'; Row = $z.Dr } }
+        $zi = 0
+        if ($index.ByZip9.TryGetValue(($p.V + $p.Plus4 + '_'), [ref]$zi)) {
+            return @{ Code = $index.Code[$zi]; Flag = 'ZIP9'; Row = $index.Dr[$zi] }
+        }
     }
     if (-not $p.CityOk) { return @{ Code = $null; Flag = 'NO CODE-CITY'; Row = $null } }
     if ($p.W -eq '') { return @{ Code = $null; Flag = 'NO MATCH'; Row = $null } }
-    $block = $index.ByKey[($p.W + ' ' + $p.V)]
-    if (-not $block) { return @{ Code = $null; Flag = 'NO MATCH'; Row = $null } }
-    $AA = $block[0].Dr
-    $h = $p.House
-    # pass 1: house in range, odd/even ok, AND suffix agrees (or either side blank). Keep the LAST.
-    $ab = $null
-    foreach ($rec in $block) {
-        if ((Test-NeRange $rec.Lo $rec.Hi $h) -and (Test-NeOddEven $rec.E $h) -and (($rec.H.ToUpper() -eq $p.R) -or ($p.R -eq '') -or ($rec.H -eq ''))) { $ab = $rec }
-    }
-    # pass 2 (fallback): drop the suffix condition
-    if ($null -eq $ab) {
-        foreach ($rec in $block) {
-            if ((Test-NeRange $rec.Lo $rec.Hi $h) -and (Test-NeOddEven $rec.E $h)) { $ab = $rec }
-        }
-    }
-    if ($null -ne $ab) { return @{ Code = $ab.Code; Flag = 'OK'; Row = $ab.Dr } }
-    return @{ Code = 0; Flag = 'FALLBACK'; Row = $AA }
-}
+    $lst = $null
+    if (-not $index.Map.TryGetValue(($p.W + ' ' + $p.V), [ref]$lst)) { return @{ Code = $null; Flag = 'NO MATCH'; Row = $null } }
 
-# Build the index from parallel arrays (as read from a quarterly file).
-# $dr/$key/$lo/$hi/$e/$h/$code are same-length arrays; $concat only needed when
-# any customer zip is 9-digit (pass $null to skip the ZIP9 index and save memory).
-function New-NeIndex($dr, $key, $lo, $hi, $e, $h, $code, $concat) {
-    $byKey = @{}
-    $byZip9 = @{}
-    $n = $key.Count
-    for ($i = 0; $i -lt $n; $i++) {
-        $k = "" + $key[$i]
-        if ($k -ne '') {
-            $rec = [pscustomobject]@{ Dr = $dr[$i]; Lo = $lo[$i]; Hi = $hi[$i]; E = ("" + $e[$i]); H = ("" + $h[$i]); Code = $code[$i] }
-            $lst = $byKey[$k]
-            if ($null -eq $lst) { $lst = New-Object 'System.Collections.Generic.List[object]'; $byKey[$k] = $lst }
-            $lst.Add($rec)
+    $h = $p.House
+    $ab = -1
+    if ($null -ne $h) {
+        $odd = ($h % 2)
+        $r = $p.R
+        # pass 1: range + odd/even + suffix agrees (or either side blank). Keep the LAST.
+        foreach ($i in $lst) {
+            $lo = $index.Lo[$i]
+            if ($lo -lt 0 -or $h -lt $lo -or $h -gt $index.Hi[$i]) { continue }
+            $e = $index.E[$i]
+            if (-not ($e -eq 'B' -or $e -eq '' -or ($e -eq 'O' -and $odd -eq 1) -or ($e -eq 'E' -and $odd -eq 0))) { continue }
+            $sh = $index.H[$i]
+            if ($sh -eq $r -or $r -eq '' -or $sh -eq '') { $ab = $i }
         }
-        if ($null -ne $concat) {
-            # Concat zip is "zip5 plus4 _ [citycode]" e.g. 687913029_530 or 680071677_.
-            # The engine matches it as V&plus4&"_*" (wildcard after the underscore),
-            # so we key on the "zip5plus4_" PREFIX only - NOT the full string, which
-            # would miss every row that has a code appended.
-            $w = "" + $concat[$i]
-            $us = $w.IndexOf('_')
-            if ($us -ge 0) {
-                $wk = $w.Substring(0, $us + 1)
-                if (-not $byZip9.ContainsKey($wk)) { $byZip9[$wk] = [pscustomobject]@{ Dr = $dr[$i]; Code = $code[$i] } }
+        # pass 2 (fallback): same, ignoring the suffix
+        if ($ab -lt 0) {
+            foreach ($i in $lst) {
+                $lo = $index.Lo[$i]
+                if ($lo -lt 0 -or $h -lt $lo -or $h -gt $index.Hi[$i]) { continue }
+                $e = $index.E[$i]
+                if ($e -eq 'B' -or $e -eq '' -or ($e -eq 'O' -and $odd -eq 1) -or ($e -eq 'E' -and $odd -eq 0)) { $ab = $i }
             }
         }
     }
-    return @{ ByKey = $byKey; ByZip9 = $byZip9 }
+    if ($ab -ge 0) { return @{ Code = $index.Code[$ab]; Flag = 'OK'; Row = $index.Dr[$ab] } }
+    return @{ Code = 0; Flag = 'FALLBACK'; Row = $index.Dr[$lst[0]] }
+}
+
+# Build the index from parallel arrays (as read from a quarterly file).
+# $neededKeys / $neededZip9 (optional HashSet[string]): when supplied, only rows
+# whose key is actually wanted by this batch are indexed. A quarter file has
+# ~300k rows but a workpaper usually needs a few hundred distinct streets, so
+# this is the difference between minutes and seconds.
+function New-NeIndex($dr, $key, $lo, $hi, $e, $h, $code, $concat, $neededKeys = $null, $neededZip9 = $null) {
+    $n = $key.Count
+    $map = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[int]]'
+    $z9  = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+    $loA = New-Object 'long[]' $n
+    $hiA = New-Object 'long[]' $n
+    $eA  = New-Object 'string[]' $n
+    $hA  = New-Object 'string[]' $n
+    $filterK = ($null -ne $neededKeys -and $neededKeys.Count -gt 0)
+    $filterZ = ($null -ne $neededZip9 -and $neededZip9.Count -gt 0)
+    $lv = [long]0; $hv = [long]0
+    for ($i = 0; $i -lt $n; $i++) {
+        $k = [string]$key[$i]
+        if ($k -ne '' -and ((-not $filterK) -or $neededKeys.Contains($k))) {
+            if ([long]::TryParse([string]$lo[$i], [ref]$lv)) { $loA[$i] = $lv } else { $loA[$i] = -1 }
+            if ([long]::TryParse([string]$hi[$i], [ref]$hv)) { $hiA[$i] = $hv } else { $hiA[$i] = -1 }
+            $eA[$i] = ([string]$e[$i]).ToUpper()
+            $hA[$i] = ([string]$h[$i]).ToUpper()
+            $lst = $null
+            if (-not $map.TryGetValue($k, [ref]$lst)) { $lst = New-Object 'System.Collections.Generic.List[int]'; $map[$k] = $lst }
+            $lst.Add($i)
+        }
+        if ($null -ne $concat) {
+            $w = [string]$concat[$i]
+            if ($w -ne '') {
+                $us = $w.IndexOf('_')
+                if ($us -ge 0) {
+                    $wk = $w.Substring(0, $us + 1)
+                    if (((-not $filterZ) -or $neededZip9.Contains($wk)) -and (-not $z9.ContainsKey($wk))) { $z9[$wk] = $i }
+                }
+            }
+        }
+    }
+    return @{ Map = $map; ByZip9 = $z9; Lo = $loA; Hi = $hiA; E = $eA; H = $hA; Code = $code; Dr = $dr }
 }
 
 # ============================================================================

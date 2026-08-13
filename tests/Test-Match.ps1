@@ -67,6 +67,15 @@ Eq $r.Flag 'ZIP9' 'uncoded concat (680071678_) -> ZIP9'
 $r = Find-NeCode (Get-NeParse '17150 Potter St' 'Bennington' '68007') $zidx
 Eq $r.Flag 'OK' '5-digit zip (no plus4) -> street match, not ZIP9'
 
+Write-Host "`n== oversized / odd house numbers ==" -ForegroundColor Cyan
+# a real sales file contained 3194158696 - larger than Int32. Must not throw.
+$p = Get-NeParse '3194158696 Main St' 'Aurora' '68000'
+Eq $p.House 3194158696 'house number larger than Int32 parses as Int64'
+$r = M '3194158696 Main St' 'Aurora' '68000'
+Eq $r.Flag 'FALLBACK' 'huge house number falls back rather than crashing'
+$p = Get-NeParse '99999999999999999999999 Main St' 'Aurora' '68000'
+Ok ($null -eq $p.House) 'absurd house number (beyond Int64) -> null, no throw'
+
 Write-Host "`n== fuzzy repair ==" -ForegroundColor Cyan
 Eq (Repair-NeAddress '150 MAIN STREE').Text '150 MAIN ST' 'misspelled suffix repaired'
 Eq (Repair-NeAddress '100 MAIN ST N').Text '100 N MAIN ST' 'direction moved to front'

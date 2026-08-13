@@ -38,7 +38,7 @@ $ErrorActionPreference = 'Stop'
 $StartTime = Get-Date
 
 $CodeNumberFormat = '000'
-$ReadChunk = 50000
+$ReadChunk = 200000        # bigger chunks = far fewer COM round-trips
 
 # ---- constants ----
 $xlCalcManual = -4135; $xlCalcAutomatic = -4105
@@ -51,7 +51,21 @@ foreach ($lib in @('NeDicts.ps1','NeMatch.ps1','NeTaxPaste.ps1')) {
 . (Join-Path $folder 'NeMatch.ps1')       # also dot-sources NeDicts.ps1
 . (Join-Path $folder 'NeTaxPaste.ps1')
 
-function WrHead($t) { Write-Host ''; Write-Host ('=' * 72) -ForegroundColor DarkCyan; Write-Host "  $t" -ForegroundColor Cyan; Write-Host ('=' * 72) -ForegroundColor DarkCyan }
+$script:Phase = 0
+function WrHead($t) {
+    $script:Phase++
+    Write-Host ''
+    Write-Host ('  +' + ('-' * 68) + '+') -ForegroundColor DarkCyan
+    Write-Host ('  | ' + ("{0,-2} {1,-64}" -f $script:Phase, $t) + '|') -ForegroundColor Cyan
+    Write-Host ('  +' + ('-' * 68) + '+') -ForegroundColor DarkCyan
+}
+function WrBanner($t, $sub) {
+    Write-Host ''
+    Write-Host ('  ' + ('=' * 70)) -ForegroundColor DarkCyan
+    Write-Host ('  ' + $t) -ForegroundColor White
+    if ($sub) { Write-Host ('  ' + $sub) -ForegroundColor DarkGray }
+    Write-Host ('  ' + ('=' * 70)) -ForegroundColor DarkCyan
+}
 function WrStep($t) { Write-Host "  $t" -ForegroundColor Gray }
 function WrGood($t) { Write-Host "  $t" -ForegroundColor Green }
 function WrWarn($t){ Write-Host "  $t" -ForegroundColor Yellow }
@@ -65,7 +79,7 @@ function Get-Nth($arr, [int]$i) {
 }
 
 # ============================================================================
-WrHead 'Nebraska City Tax Code  (pure PowerShell)'
+WrBanner 'NEBRASKA CITY TAX CODE' 'address -> city code, written straight onto your working paper'
 WrStep "Folder: $folder"
 $addrFolder = Join-Path $folder '_Address'
 if (-not (Test-Path -LiteralPath $addrFolder)) { WrDie "The '_Address' folder was not found next to this script." }
@@ -251,6 +265,73 @@ if ($groups.Count -eq 0) { WrWarn 'No rows matched a quarterly file.' } else { f
 
 # ============================================================================
 WrHead 'Matching against the tax data'
+
+# FAST PATH: pulling ~300k x 7 cells out of Excel one range at a time costs
+# minutes (COM marshals every cell). Instead we have Excel write the sheet out
+# once as a tab-delimited file and read that with .NET - typically 10-50x
+# faster - and keep it in _Cache so later runs skip the export completely.
+# Returns $null if anything goes wrong, so the caller falls back to COM.
+function Read-QuarterFast($path) {
+    $cacheDir = Join-Path $folder '_Cache'
+    if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir | Out-Null }
+    $tsv = Join-Path $cacheDir ([IO.Path]::GetFileNameWithoutExtension($path) + '.txt')
+    $src = Get-Item -LiteralPath $path
+    $fresh = (Test-Path -LiteralPath $tsv) -and ((Get-Item -LiteralPath $tsv).LastWriteTimeUtc -ge $src.LastWriteTimeUtc)
+    if (-not $fresh) {
+        WrStep '      exporting tax file to a fast cache (one time per file)...'
+        Write-Progress -Activity 'Exporting tax data' -Status 'Excel is writing the cache file...' -PercentComplete 30
+        $xlUnicodeText = 42
+        $qwb = $excel.Workbooks.Open($src.FullName, 0, $true)
+        try {
+            $qwb.Worksheets.Item(1).Copy()          # new workbook holding just that sheet
+            $tmpWb = $excel.ActiveWorkbook
+            $tmpWb.SaveAs($tsv, $xlUnicodeText)
+            $tmpWb.Close($false)
+        } finally { $qwb.Close($false) }
+        Write-Progress -Activity 'Exporting tax data' -Completed
+    } else { WrStep '      using cached tax data (delete _Cache to force a refresh)' }
+
+    # ---- read the tab file with .NET ----
+    $need = @{ lo = 2; hi = 3; e = 4; h = 7; concat = 22; key = 23; code = 24 }   # 0-based
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $sr = New-Object System.IO.StreamReader($tsv, [System.Text.Encoding]::Unicode)
+    try { while ($null -ne ($ln = $sr.ReadLine())) { $lines.Add($ln) } } finally { $sr.Dispose() }
+    if ($lines.Count -lt 2) { return $null }
+
+    # header row: column G (index 6) says "Street Name"
+    $hdrIdx = -1
+    for ($i = 0; $i -lt [Math]::Min(5, $lines.Count); $i++) {
+        $f = $lines[$i].Split("`t")
+        if ($f.Count -gt 6 -and $f[6] -and $f[6].ToUpper().Contains('STREET')) { $hdrIdx = $i; break }
+    }
+    if ($hdrIdx -lt 0) { return $null }
+    $hf = $lines[$hdrIdx].Split("`t")
+    if ($hf.Count -gt 24 -and $hf[24] -and -not $hf[24].ToUpper().Contains('CITY CODE')) {
+        throw "column Y of $(Split-Path $path -Leaf) is '$($hf[24])', not 'City Code (final)'"
+    }
+
+    $qn = $lines.Count - $hdrIdx - 1
+    if ($qn -lt 1) { return $null }
+    $res = @{ n = $qn; dr = (New-Object 'object[]' $qn); key = (New-Object 'object[]' $qn)
+        lo = (New-Object 'object[]' $qn); hi = (New-Object 'object[]' $qn); e = (New-Object 'object[]' $qn)
+        h = (New-Object 'object[]' $qn); code = (New-Object 'object[]' $qn); concat = $null }
+    if ($anyZip9) { $res.concat = New-Object 'object[]' $qn }
+    for ($i = 0; $i -lt $qn; $i++) {
+        $f = $lines[$hdrIdx + 1 + $i].Split("`t")
+        $res.dr[$i] = $hdrIdx + 2 + $i
+        if ($f.Count -gt $need.key)  { $res.key[$i]  = $f[$need.key] }
+        if ($f.Count -gt $need.lo)   { $res.lo[$i]   = $f[$need.lo] }
+        if ($f.Count -gt $need.hi)   { $res.hi[$i]   = $f[$need.hi] }
+        if ($f.Count -gt $need.e)    { $res.e[$i]    = $f[$need.e] }
+        if ($f.Count -gt $need.h)    { $res.h[$i]    = $f[$need.h] }
+        if ($f.Count -gt $need.code) { $res.code[$i] = $f[$need.code] }
+        if ($null -ne $res.concat -and $f.Count -gt $need.concat) { $res.concat[$i] = $f[$need.concat] }
+        if (($i % 50000) -eq 0) { Write-Progress -Activity 'Reading tax data' -Status ("{0:N0} / {1:N0}" -f $i, $qn) -PercentComplete (100 * $i / $qn) }
+    }
+    Write-Progress -Activity 'Reading tax data' -Completed
+    return $res
+}
+
 function Read-QuarterColumns($path) {
     $qwb = $excel.Workbooks.Open($path, 0, $true)
     try {
@@ -278,7 +359,19 @@ function Read-QuarterColumns($path) {
             return , $arr
         }
         $dr = New-Object 'object[]' $qn; for ($i = 0; $i -lt $qn; $i++) { $dr[$i] = $qFirst + $i }
-        $res = @{ n = $qn; dr = $dr; key = (RdCol 24); lo = (RdCol 3); hi = (RdCol 4); e = (RdCol 5); h = (RdCol 8); code = (RdCol 25); concat = $(if ($anyZip9) { RdCol 23 } else { $null }) }
+        $cols = @(
+            @{ n = 'key';  c = 24 }, @{ n = 'lo'; c = 3 }, @{ n = 'hi'; c = 4 },
+            @{ n = 'e';    c = 5 },  @{ n = 'h';  c = 8 }, @{ n = 'code'; c = 25 }
+        )
+        if ($anyZip9) { $cols += @{ n = 'concat'; c = 23 } }
+        $res = @{ n = $qn; dr = $dr; concat = $null }
+        $ci = 0
+        foreach ($cd in $cols) {
+            $ci++
+            Write-Progress -Activity "Loading tax data ($qn rows)" -Status ("column {0} of {1}: {2}" -f $ci, $cols.Count, $cd.n) -PercentComplete (100 * $ci / $cols.Count)
+            $res[$cd.n] = RdCol $cd.c
+        }
+        Write-Progress -Activity "Loading tax data ($qn rows)" -Completed
         return $res
     } finally { $qwb.Close($false) }
 }
@@ -286,42 +379,109 @@ function Read-QuarterColumns($path) {
 $qi = 0
 foreach ($q in ($groups.Keys | Sort-Object)) {
     $qi++
-    WrStep ("[{0}/{1}] {2}: loading tax data..." -f $qi, $groups.Count, $q)
-    $t0 = Get-Date
-    try { $qd = Read-QuarterColumns $qMap[$q] } catch { WrDie "Quarter $q failed: $($_.Exception.Message)" }
-    # normalise code to int
-    $codeArr = New-Object 'object[]' $qd.n
-    for ($i = 0; $i -lt $qd.n; $i++) { $cy = 0.0; $codeArr[$i] = if ([double]::TryParse("$($qd.code[$i])", [ref]$cy)) { [int]$cy } else { $null } }
-    $index = New-NeIndex $qd.dr $qd.key $qd.lo $qd.hi $qd.e $qd.h $codeArr $qd.concat
-    WrStep ("      {0:N0} tax rows in {1:N1}s; matching {2:N0} address(es)..." -f $qd.n, ((Get-Date) - $t0).TotalSeconds, $groups[$q].Count)
-    $repaired = 0; $cache = @{}; $qTot = $groups[$q].Count; $qDone = 0; $t2 = Get-Date
-    foreach ($ri in $groups[$q]) {
-        # Sales data repeats the same store addresses thousands of times - match each
-        # DISTINCT address+city+zip once and reuse the answer. This is the big speed-up.
-        $ckey = $aAddr[$ri] + '|' + $aCity[$ri] + '|' + $aZip[$ri]
-        $m = $cache[$ckey]
-        if ($null -eq $m) {
-            $p = Get-NeParse $aAddr[$ri] $aCity[$ri] $aZip[$ri]
-            $m = Find-NeCode $p $index
-            if ($m.Flag -eq 'NO MATCH' -or $m.Flag -eq 'FALLBACK') {
-                $rep = Repair-NeAddress $aAddr[$ri]
-                if ($rep.Note) {
-                    $p2 = Get-NeParse $rep.Text $aCity[$ri] $aZip[$ri]
-                    $m2 = Find-NeCode $p2 $index
-                    $better = ($m2.Flag -eq 'OK' -or $m2.Flag -eq 'ZIP9' -or ($m2.Flag -eq 'FALLBACK' -and $m.Flag -eq 'NO MATCH'))
-                    if ($better) { $m = @{ Code = $m2.Code; Flag = "$($m2.Flag) - REPAIRED: $($rep.Note)" }; $repaired++ }
-                }
-            }
-            $cache[$ckey] = $m
+    $rowIdx = $groups[$q]; $qTot = $rowIdx.Count
+    Write-Host ''
+    WrStep ("[{0}/{1}]  {2}   {3:N0} row(s)" -f $qi, $groups.Count, $q, $qTot)
+
+    # ---- 1. distinct addresses (sales data repeats the same stores endlessly) ----
+    $tA = Get-Date
+    $uniqKeys = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+    $uAddr = New-Object 'System.Collections.Generic.List[string]'
+    $uCity = New-Object 'System.Collections.Generic.List[string]'
+    $uZip  = New-Object 'System.Collections.Generic.List[string]'
+    $rowToU = New-Object 'int[]' $qTot
+    $seen = 0; $ui = 0
+    foreach ($ri in $rowIdx) {
+        $ck = $aAddr[$ri] + '|' + $aCity[$ri] + '|' + $aZip[$ri]
+        $u = 0
+        if (-not $uniqKeys.TryGetValue($ck, [ref]$u)) {
+            $u = $uAddr.Count; $uniqKeys[$ck] = $u
+            $uAddr.Add($aAddr[$ri]); $uCity.Add($aCity[$ri]); $uZip.Add($aZip[$ri])
         }
-        $finalCode[$ri] = $m.Code; $finalFlag[$ri] = $m.Flag
-        $qDone++
-        if (($qDone % 5000) -eq 0) { Write-Progress -Activity "Matching $q" -Status ("{0:N0} / {1:N0}  ({2:N0} unique)" -f $qDone, $qTot, $cache.Count) -PercentComplete (100 * $qDone / $qTot) }
+        $rowToU[$ui] = $u; $ui++
+        $seen++
+        if (($seen % 100000) -eq 0) { Write-Progress -Activity "$q  -  finding distinct addresses" -Status ("{0:N0} / {1:N0}   ({2:N0} distinct)" -f $seen, $qTot, $uAddr.Count) -PercentComplete (100 * $seen / $qTot) }
     }
-    Write-Progress -Activity "Matching $q" -Completed
-    WrStep ("      matched {0:N0} row(s) via {1:N0} unique address(es) in {2:N1}s{3}" -f $qTot, $cache.Count, ((Get-Date) - $t2).TotalSeconds, $(if ($repaired) { "; fuzzy-repaired $repaired" } else { '' }))
-    $index = $null; $cache = $null; [System.GC]::Collect()
+    Write-Progress -Activity "$q  -  finding distinct addresses" -Completed
+    $nU = $uAddr.Count
+    WrStep ("      {0,10:N0} distinct address(es)   ({1:N1}s)" -f $nU, ((Get-Date) - $tA).TotalSeconds)
+
+    # ---- 2. parse them once, and work out which tax keys we actually need ----
+    $tB = Get-Date
+    $parses = New-Object 'object[]' $nU
+    $parses2 = New-Object 'object[]' $nU      # repaired variant (or $null)
+    $notes2 = New-Object 'string[]' $nU
+    $needK = New-Object 'System.Collections.Generic.HashSet[string]'
+    $needZ = New-Object 'System.Collections.Generic.HashSet[string]'
+    for ($u = 0; $u -lt $nU; $u++) {
+        $p = Get-NeParse $uAddr[$u] $uCity[$u] $uZip[$u]
+        $parses[$u] = $p
+        if ($p.W -ne '') { [void]$needK.Add($p.W + ' ' + $p.V) }
+        if ($p.Plus4 -ne '') { [void]$needZ.Add($p.V + $p.Plus4 + '_') }
+        $rep = Repair-NeAddress $uAddr[$u]
+        if ($rep.Note) {
+            $p2 = Get-NeParse $rep.Text $uCity[$u] $uZip[$u]
+            $parses2[$u] = $p2; $notes2[$u] = $rep.Note
+            if ($p2.W -ne '') { [void]$needK.Add($p2.W + ' ' + $p2.V) }
+        }
+        if (($u % 2000) -eq 0 -and $nU -gt 2000) { Write-Progress -Activity "$q  -  parsing addresses" -Status ("{0:N0} / {1:N0}" -f $u, $nU) -PercentComplete (100 * $u / $nU) }
+    }
+    Write-Progress -Activity "$q  -  parsing addresses" -Completed
+    WrStep ("      {0,10:N0} street key(s) needed     ({1:N1}s)" -f $needK.Count, ((Get-Date) - $tB).TotalSeconds)
+
+    # ---- 3. load the quarterly file ----
+    $tC = Get-Date
+    $qd = $null
+    try { $qd = Read-QuarterFast $qMap[$q] }
+    catch { WrWarn "      fast read unavailable ($($_.Exception.Message)); using the slower COM read"; $qd = $null }
+    if ($null -eq $qd) {
+        try { $qd = Read-QuarterColumns $qMap[$q] } catch { WrDie "Quarter $q failed: $($_.Exception.Message)" }
+    }
+    WrStep ("      {0,10:N0} tax row(s) read          ({1:N1}s)" -f $qd.n, ((Get-Date) - $tC).TotalSeconds)
+
+    # ---- 4. index ONLY the keys this batch needs ----
+    $tD = Get-Date
+    Write-Progress -Activity "$q  -  indexing tax data" -Status "building lookup..." -PercentComplete 50
+    $codeArr = New-Object 'object[]' $qd.n
+    $cyd = 0.0
+    for ($i = 0; $i -lt $qd.n; $i++) { $codeArr[$i] = if ([double]::TryParse("$($qd.code[$i])", [ref]$cyd)) { [int]$cyd } else { $null } }
+    $index = New-NeIndex $qd.dr $qd.key $qd.lo $qd.hi $qd.e $qd.h $codeArr $qd.concat $needK $needZ
+    Write-Progress -Activity "$q  -  indexing tax data" -Completed
+    $qd = $null
+    WrStep ("      {0,10:N0} street(s) indexed        ({1:N1}s)" -f $index.Map.Count, ((Get-Date) - $tD).TotalSeconds)
+
+    # ---- 5. match each distinct address once (with the fuzzy retry) ----
+    $tE = Get-Date
+    $uCode = New-Object 'object[]' $nU
+    $uFlag = New-Object 'string[]' $nU
+    $repaired = 0
+    for ($u = 0; $u -lt $nU; $u++) {
+        $m = Find-NeCode $parses[$u] $index
+        if (($m.Flag -eq 'NO MATCH' -or $m.Flag -eq 'FALLBACK') -and $null -ne $parses2[$u]) {
+            $m2 = Find-NeCode $parses2[$u] $index
+            if ($m2.Flag -eq 'OK' -or $m2.Flag -eq 'ZIP9' -or ($m2.Flag -eq 'FALLBACK' -and $m.Flag -eq 'NO MATCH')) {
+                $m = @{ Code = $m2.Code; Flag = "$($m2.Flag) - REPAIRED: $($notes2[$u])" }; $repaired++
+            }
+        }
+        $uCode[$u] = $m.Code; $uFlag[$u] = $m.Flag
+        if (($u % 2000) -eq 0 -and $nU -gt 2000) { Write-Progress -Activity "$q  -  matching" -Status ("{0:N0} / {1:N0}" -f $u, $nU) -PercentComplete (100 * $u / $nU) }
+    }
+    Write-Progress -Activity "$q  -  matching" -Completed
+    WrStep ("      {0,10:N0} matched{1}   ({2:N1}s)" -f $nU, $(if ($repaired) { " ($repaired fuzzy-repaired)" } else { '' }), ((Get-Date) - $tE).TotalSeconds)
+
+    # ---- 6. fan the answers back out to every row ----
+    $tF = Get-Date
+    for ($j = 0; $j -lt $qTot; $j++) {
+        $ri = $rowIdx[$j]; $u = $rowToU[$j]
+        $finalCode[$ri] = $uCode[$u]; $finalFlag[$ri] = $uFlag[$u]
+        if (($j % 100000) -eq 0 -and $qTot -gt 100000) { Write-Progress -Activity "$q  -  applying to rows" -Status ("{0:N0} / {1:N0}" -f $j, $qTot) -PercentComplete (100 * $j / $qTot) }
+    }
+    Write-Progress -Activity "$q  -  applying to rows" -Completed
+    WrGood ("      {0,10:N0} row(s) done              ({1:N1}s total for {2})" -f $qTot, ((Get-Date) - $tA).TotalSeconds, $q)
+    $index = $null; $parses = $null; $parses2 = $null; $uniqKeys = $null
+    [System.GC]::Collect()
 }
+Write-Host ''
 WrGood 'Matching complete.'
 
 # ============================================================================
@@ -363,8 +523,16 @@ if ($saved) { WrGood "Saved: $($wbFile.Name)" } else { Write-Host '  COULD NOT S
 # ============================================================================
 WrHead 'Summary'
 $tally = @{}
-for ($i = 0; $i -lt $nRows; $i++) { $f = $finalFlag[$i]; if (-not $f) { $f = '(blank)' }; if (-not $tally.ContainsKey($f)) { $tally[$f] = 0 }; $tally[$f]++ }
-foreach ($k in ($tally.Keys | Sort-Object { -$tally[$_] })) { Write-Host ("   {0,-16} {1,8:N0}   {2,5:N1}%" -f $k, $tally[$k], (100 * $tally[$k] / $nRows)) }
+for ($i = 0; $i -lt $nRows; $i++) { $f = $finalFlag[$i]; if (-not $f) { $f = '(blank)' }; $b = ($f -split ' - ')[0].Trim(); if (-not $tally.ContainsKey($b)) { $tally[$b] = 0 }; $tally[$b]++ }
+Write-Host ''
+Write-Host ("   {0,-16} {1,10} {2,7}   {3}" -f 'FLAG', 'ROWS', 'SHARE', '') -ForegroundColor White
+Write-Host ('   ' + ('-' * 62)) -ForegroundColor DarkGray
+foreach ($k in ($tally.Keys | Sort-Object { -$tally[$_] })) {
+    $pct = 100 * $tally[$k] / $nRows
+    $bar = '#' * [Math]::Max(0, [Math]::Round($pct / 4))
+    $col = switch -Wildcard ($k) { 'OK' { 'Green' } 'ZIP9' { 'Green' } 'NO CODE-CITY' { 'Gray' } 'OOS' { 'Gray' } 'NO DATE' { 'Gray' } 'NO TAX FILE*' { 'Gray' } default { 'Yellow' } }
+    Write-Host ("   {0,-16} {1,10:N0} {2,6:N1}%   {3}" -f $k, $tally[$k], $pct, $bar) -ForegroundColor $col
+}
 Write-Host ''
 WrGood ("Finished in {0:N1} min." -f ((Get-Date) - $StartTime).TotalMinutes)
 $excel.Visible = $true; $excel.EnableEvents = $true
