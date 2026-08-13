@@ -71,13 +71,35 @@ of the engine's own work, exactly as it came out.
 
 ### Clean output, your choice of location (Sections 3b, 9)
 A new prompt: **press Enter to append at the end**, or type a column
-(`T`, or a header name) to **insert** the four result columns there. Insert uses
+(`T`, or a header name) to **insert** the result column(s) there. Insert uses
 `Columns.Insert(xlShiftToRight)`, so existing data slides right and is never
-written over. Every result column is still written on its own — the `T:W`
-scramble is structurally impossible now.
+written over. Every result column is written on its own — the `T:W` scramble is
+structurally impossible now.
 
-The four columns written to the working paper are the **final (repaired)**
-answer — your good run — `NE City Code | Match Row # | Match Flag | Source File`.
+### Minimal output: code only, formatted `000` (Section 9)
+The working paper gets **one column by default — `NE City Code`, formatted
+`000`** (0 → `000`, 94 → `094`), every cell the same. The **Match Flag** is an
+opt-in second column (`-IncludeFlag`, or answer `Y` at the prompt). `Match Row #`
+and `Source File` no longer clutter the working paper — they live in the engine
+backup and `_Results_check.csv` for auditing. The written answer is the **final
+(repaired)** result — your good run.
+
+### The paste is its own tested unit (`NeTaxPaste.ps1` + `tests/`)
+All workbook-writing moved into `NeTaxPaste.ps1` (`Add-ResultColumns`,
+`Write-ColumnValues`, `Write-ResultBlock`, `New-EngineBackup`), dot-sourced by
+the main script. `tests/Test-Paste.ps1` runs those *same* functions against a
+throwaway workbook — real Excel if present, otherwise a faithful COM mock
+(`tests/ExcelMock.ps1`) — and reads every cell back to check append vs insert,
+per-row alignment across chunk boundaries, no-overwrite, the `000` format, and
+the value-pasted per-quarter engine backup. `tests/Check-Workpaper.py` (and a
+`.ps1` twin) scan a *finished* paper for the scramble signature and invalid
+codes; run on the sample they flag the old file's 63 scrambled + 24 invalid
+rows and pass the fixed one.
+
+**A real bug the paste test caught before shipping:** in PowerShell `@($array)`
+*flattens*, so the code-only path (`$columns = @($finalCode)`) silently arrived
+as N scalars and wrote only row 1. Fixed by passing a single column as
+`(,$array)` and adding a loud count-mismatch guard in `Write-ResultBlock`.
 
 ### It always saves (Section 11)
 `Save()` retries up to 4× with backoff; if the file is locked it falls back to

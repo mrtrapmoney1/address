@@ -43,6 +43,7 @@ param(
     [int]   $HeaderRow = 0,       # header row (0 = ask / default 1)
     [string]$PasteAt,             # 'END' to append, or a column letter/header to insert at
     [int]   $MaxParallel = 0,     # 0 = auto (CPU-based). 1 = old sequential behaviour.
+    [switch]$IncludeFlag,         # also write the Match Flag column beside the code
     [switch]$NonInteractive       # never prompt; use params + sensible defaults
 )
 
@@ -60,7 +61,7 @@ $TryRepairs       = $true   # retry failed rows with a cleaned-up address (pass 
 $BackupEngineRun  = $true   # write the pass-1 engine answers to per-quarter backup sheets
 $KeepEngine       = $true   # save one engine copy per quarter so you can open and look
 $ShowSample       = 8       # print this many finished rows to the screen as a sanity check
-$CodeNumberFormat = 'General'   # how the code column LOOKS. '000' shows 094 instead of 94.
+$CodeNumberFormat = '000'       # how the code column LOOKS. '000' shows 094 / 000 (3 digits).
 $DumpCsv          = 200     # also dump this many finished rows to _Results_check.csv
 $NoCodeCityZero   = $false  # $true = write 0 instead of blank when a city levies no local tax
 $MaxParallelCap   = 6       # never launch more than this many Excel processes at once
@@ -86,18 +87,13 @@ function Get-ScriptFolder {
     return (Get-Location).Path
 }
 
-function Get-ColLetter([int]$n) {
-    $s = ''
-    while ($n -gt 0) { $m = ($n - 1) % 26; $s = [char](65 + $m) + $s; $n = [int](($n - $m) / 26) }
-    return $s
-}
-function Get-ColNumber([string]$letters) {
-    $letters = ($letters -replace '[^A-Za-z]', '').ToUpper()
-    if (-not $letters) { return 0 }
-    $n = 0
-    foreach ($ch in $letters.ToCharArray()) { $n = $n * 26 + ([int][char]$ch - 64) }
-    return $n
-}
+# Column helpers AND every workbook-writing function live in NeTaxPaste.ps1, so
+# the paste can be tested on its own against a throwaway workbook - no engine,
+# no real run. See tests\Test-Paste.ps1. Production and the test call the exact
+# same functions, so the test proves the real thing.
+$script:PasteLib = Join-Path (Get-ScriptFolder) 'NeTaxPaste.ps1'
+if (-not (Test-Path -LiteralPath $script:PasteLib)) { throw "Required file 'NeTaxPaste.ps1' was not found next to this script." }
+. $script:PasteLib
 
 $script:excel = $null
 function Stop-Everything([string]$msg) {
@@ -424,7 +420,7 @@ $WorkerScript = {
     finally {
         try { if ($ewb) { $ewb.Close($false) } } catch { }
         try { if ($xl)  { $xl.Quit() } } catch { }
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl) 2>$null | Out-Null
+        try { if ($xl)  { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($xl) | Out-Null } } catch { }
     }
 
     return @{
@@ -636,6 +632,18 @@ if ($PasteAt) {
 if ($insertAt -gt 0) { Write-Good "Results will be INSERTED at column $(Get-ColLetter $insertAt) (existing data shifts right)." }
 else                 { Write-Good "Results will be APPENDED after the last used column." }
 
+# ---- code only, or code + flag? ----
+# Default is the code alone, formatted 000 (three digits). The Match Flag is an
+# opt-in second column. Match Row # / Source File never clutter the working
+# paper - they live in the engine backup and _Results_check.csv for auditing.
+$writeFlag = [bool]$IncludeFlag
+if (-not $IncludeFlag -and -not $NonInteractive) {
+    $ansF = Read-Host "`n  Also add a Match Flag column next to the code? (y/N)"
+    if ($ansF -match '^[Yy]') { $writeFlag = $true }
+}
+if ($writeFlag) { Write-Good "Output columns: NE City Code (000) + Match Flag." }
+else            { Write-Good "Output column : NE City Code only, formatted 000 (three digits)." }
+
 # ---- parallelism ----
 if ($MaxParallel -le 0) {
     $cpu = 2; try { $cpu = [int]$env:NUMBER_OF_PROCESSORS } catch { }
@@ -771,6 +779,8 @@ if (-not $runParallel) {
         Write-Step ("[{0}/{1}] {2}  ({3:N0} rows)..." -f $qn, $jobs.Count, $job.QuarterKey, $job.Indexes.Count)
         $t0 = Get-Date
         $r = & $WorkerScript $job
+        $r = @($r | Where-Object { $_ -is [hashtable] })[0]   # ignore any stray pipeline output
+        if ($null -eq $r)  { Stop-Everything "Quarter $($job.QuarterKey) returned no result." }
         if ($r.Error) { Stop-Everything "Quarter $($job.QuarterKey) failed: $($r.Error)" }
         Write-Good ("      done in {0:N1}s" -f ((Get-Date) - $t0).TotalSeconds)
         $results += $r
@@ -796,11 +806,19 @@ if (-not $runParallel) {
         Start-Sleep -Milliseconds 250
         foreach ($r in $running) {
             if (-not $r.Done -and $r.Handle.IsCompleted) {
-                $out = $r.PS.EndInvoke($r.Handle)
+                $out = $null; $workerErr = $null
+                try { $out = $r.PS.EndInvoke($r.Handle) }
+                catch { $workerErr = $_.Exception.Message }
+                # surface anything the worker wrote to its error stream, too
+                if (-not $workerErr -and $r.PS.HadErrors -and $r.PS.Streams.Error.Count -gt 0) {
+                    $workerErr = ($r.PS.Streams.Error | ForEach-Object { $_.ToString() }) -join ' | '
+                }
                 $r | Add-Member -NotePropertyName Done -NotePropertyValue $true -Force
                 $r.PS.Dispose()
-                $res = $out | Select-Object -First 1
-                if ($res.Error) { $pool.Close(); Stop-Everything "Quarter $($r.Key) failed: $($res.Error)" }
+                $res = if ($out) { $out | Where-Object { $_ -is [hashtable] } | Select-Object -First 1 } else { $null }
+                if ($workerErr) { $pool.Close(); Stop-Everything "Quarter $($r.Key) failed: $workerErr" }
+                if ($null -eq $res)      { $pool.Close(); Stop-Everything "Quarter $($r.Key) returned no result (worker produced no output)." }
+                if ($res.Error)          { $pool.Close(); Stop-Everything "Quarter $($r.Key) failed: $($res.Error)" }
                 $results += $res
                 $finished++
                 Write-Good ("      finished {0}  ({1:N0} rows)   [{2}/{3}]" -f $r.Key, $r.Count, $finished, $running.Count)
@@ -883,49 +901,27 @@ if ($DumpCsv -gt 0) {
 # ============================================================================
 Write-Head '9. Writing results into the working paper'
 
-# work out the first result column: either INSERT (shift existing right) or APPEND
-$headerNames = @('NE City Code','Match Row #','Match Flag','Source File')
-$nCols = $headerNames.Count
-if ($insertAt -gt 0) {
-    $startCol = $insertAt
-    # insert brand-new blank columns so nothing is overwritten - existing data slides right
-    for ($k = 0; $k -lt $nCols; $k++) { $ws.Columns($startCol).Insert($xlShiftToRight) | Out-Null }
-    Write-Step "Inserted $nCols new column(s) at $(Get-ColLetter $startCol); existing data shifted right."
+# The working paper gets the CODE only (formatted 000), plus the Match Flag if
+# asked for. Row # and Source File are audit detail - they stay in the engine
+# backup and the CSV, not on the clean working paper.
+if ($writeFlag) {
+    $headerNames = @('NE City Code','Match Flag')
+    $columns     = $finalCode, $finalFlag    # 2-element array of arrays
 } else {
-    $startCol = $lastCol + 1
-    $safe = $false
-    while (-not $safe) {
-        $safe = $true
-        for ($c = $startCol; $c -lt $startCol + $nCols; $c++) {
-            $probe = $ws.Range($ws.Cells(1, $c), $ws.Cells([Math]::Min($lastRow, 1048576), $c))
-            if ($excel.WorksheetFunction.CountA($probe) -gt 0) { $startCol = $c + 1; $safe = $false; break }
-        }
-    }
-    Write-Step "Appending new columns starting at $(Get-ColLetter $startCol)"
+    $headerNames = @('NE City Code')
+    $columns     = ,$finalCode               # unary comma: 1 element that IS the array
 }
 
-for ($k = 0; $k -lt $nCols; $k++) { $ws.Cells($hdrRow, $startCol + $k).Value2 = $headerNames[$k] }
+# Write-ResultBlock (in NeTaxPaste.ps1) does the insert-or-append, writes each
+# column as its own (N x 1) array, and applies the 000 format to the code
+# column. This is the SAME function tests\Test-Paste.ps1 verifies.
+$startCol = Write-ResultBlock $ws $excel $hdrRow $firstDataRow $lastRow $lastCol `
+    $nRows $insertAt $headerNames $columns $ReadChunk $CodeNumberFormat 0
 
-# one column at a time - a single column of values can never trade places with another
-function Write-OneColumn([int]$col, $values, [string]$what) {
-    $done = 0
-    while ($done -lt $nRows) {
-        $take = [Math]::Min($ReadChunk, $nRows - $done)
-        $colBlock = [Array]::CreateInstance([object], $take, 1)
-        for ($i = 0; $i -lt $take; $i++) { $colBlock.SetValue($values[$done + $i], $i, 0) }
-        $r1 = $firstDataRow + $done; $r2 = $r1 + $take - 1
-        $ws.Range($ws.Cells($r1, $col), $ws.Cells($r2, $col)).Value2 = $colBlock
-        $done += $take
-        Write-Progress -Activity "Writing $what" -PercentComplete (100 * $done / $nRows)
-    }
-    Write-Progress -Activity "Writing $what" -Completed
-    Write-Step ("  {0,-14} -> column {1}" -f $what, (Get-ColLetter $col))
-}
-Write-OneColumn  $startCol        $finalCode 'NE City Code'
-Write-OneColumn ($startCol + 1)   $finalRow  'Match Row #'
-Write-OneColumn ($startCol + 2)   $finalFlag 'Match Flag'
-Write-OneColumn ($startCol + 3)   $finalSrc  'Source File'
-try { $ws.Range($ws.Cells($firstDataRow, $startCol), $ws.Cells($lastRow, $startCol)).NumberFormat = $CodeNumberFormat } catch { }
+if ($insertAt -gt 0) { Write-Step "Inserted $($headerNames.Count) new column(s) at $(Get-ColLetter $startCol); existing data shifted right." }
+else                 { Write-Step "Appended $($headerNames.Count) new column(s) starting at $(Get-ColLetter $startCol)." }
+Write-Step ("  NE City Code -> column {0} (format {1})" -f (Get-ColLetter $startCol), $CodeNumberFormat)
+if ($writeFlag) { Write-Step ("  Match Flag   -> column {0}" -f (Get-ColLetter ($startCol + 1))) }
 
 if ($script:badCodes -gt 0) {
     Write-Host ''
@@ -938,45 +934,16 @@ if ($script:badCodes -gt 0) {
 if ($BackupEngineRun) {
     Write-Head '10. Backing up the engine (pass-1) run'
     $engBookPath = Join-Path $bakDir ("{0}_ENGINE_{1}.xlsx" -f [IO.Path]::GetFileNameWithoutExtension($wbFile.Name), $stamp)
-    $bwb = $excel.Workbooks.Add()
-    # remove the default extra sheets later; build one sheet per quarter
-    $created = @()
-    foreach ($q in ($groups.Keys | Sort-Object)) {
-        $idx = $groups[$q].ToArray()
-        $sheetName = ($q -replace ' ', '') + ' (engine)'
-        if ($sheetName.Length -gt 31) { $sheetName = $sheetName.Substring(0, 31) }
-        $sh = $bwb.Worksheets.Add()
-        $sh.Name = $sheetName
-        $created += $sheetName
-        # header
-        $hdr = @('SheetRow','Address','City','Zip','Engine City Code','Engine Match Row #','Engine Flag','Source File')
-        for ($k = 0; $k -lt $hdr.Count; $k++) { $sh.Cells(1, $k + 1).Value2 = $hdr[$k] }
-        # build the whole block in memory, then value-write it column by column
-        $m = $idx.Count
-        if ($m -gt 0) {
-            $cSheetRow = New-Object 'object[]' $m; $cAddr = New-Object 'object[]' $m; $cCity = New-Object 'object[]' $m; $cZip = New-Object 'object[]' $m
-            $cCode = New-Object 'object[]' $m; $cRow = New-Object 'object[]' $m; $cFlag = New-Object 'object[]' $m; $cSrc = New-Object 'object[]' $m
-            for ($i = 0; $i -lt $m; $i++) {
-                $g = $idx[$i]
-                $cSheetRow[$i] = $firstDataRow + $g; $cAddr[$i] = $aAddr[$g]; $cCity[$i] = $aCity[$g]; $cZip[$i] = $aZip[$g]
-                $cCode[$i] = $backCode[$g]; $cRow[$i] = $backRow[$g]; $cFlag[$i] = $backFlag[$g]; $cSrc[$i] = $outSrc[$g]
-            }
-            $cols = @($cSheetRow,$cAddr,$cCity,$cZip,$cCode,$cRow,$cFlag,$cSrc)
-            for ($k = 0; $k -lt $cols.Count; $k++) {
-                $blk = [Array]::CreateInstance([object], $m, 1)
-                for ($i = 0; $i -lt $m; $i++) { $blk.SetValue($cols[$k][$i], $i, 0) }
-                $sh.Range($sh.Cells(2, $k + 1), $sh.Cells(1 + $m, $k + 1)).Value2 = $blk   # values only - no formulas anywhere
-            }
-        }
-        Write-Step ("  {0,-16} {1,8:N0} row(s)" -f $sheetName, $m)
-    }
-    # drop the blank default sheet(s) Excel created with the new workbook
-    $toRemove = @()
-    foreach ($s in $bwb.Worksheets) { if ($created -notcontains $s.Name) { $toRemove += $s } }
-    foreach ($s in $toRemove) { if ($bwb.Worksheets.Count -gt 1) { $s.Delete() | Out-Null } }
-    try { $bwb.SaveAs($engBookPath); $bwb.Close($true) } catch { Write-Warn2 "Could not save the engine backup: $($_.Exception.Message)" }
-    Write-Good "Engine backup saved: _Backups\$(Split-Path $engBookPath -Leaf)"
-    Write-Step "  (one value-pasted sheet per quarter; the repair pass cannot touch these)"
+    $quarterOrder = @($groups.Keys | Sort-Object)
+    try {
+        # New-EngineBackup (in NeTaxPaste.ps1) builds one VALUE-PASTED sheet per
+        # quarter - the same function tests\Test-Paste.ps1 verifies.
+        $bk = New-EngineBackup $excel $engBookPath $quarterOrder $groups $firstDataRow `
+            $aAddr $aCity $aZip $backCode $backRow $backFlag $outSrc
+        foreach ($sname in $bk.Sheets) { Write-Step ("  sheet: {0}" -f $sname) }
+        Write-Good "Engine backup saved: _Backups\$(Split-Path $bk.Path -Leaf)"
+        Write-Step "  (one value-pasted sheet per quarter; the repair pass cannot touch these)"
+    } catch { Write-Warn2 "Could not save the engine backup: $($_.Exception.Message)" }
 }
 
 # ============================================================================
