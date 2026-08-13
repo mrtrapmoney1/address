@@ -13,7 +13,7 @@ $exe = (Get-Process -Id $PID).Path
 if (-not $exe) { $exe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh' } else { 'powershell' } }
 
 $fail = 0
-foreach ($t in @('Test-Logic.ps1', 'Test-Match.ps1', 'Test-Paste.ps1')) {
+foreach ($t in @('Test-Logic.ps1', 'Test-Match.ps1', 'Test-Paste.ps1', 'Test-Pipeline.ps1')) {
     Write-Host "`n########## $t ##########" -ForegroundColor Cyan
     & $exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here $t)
     if ($LASTEXITCODE -ne 0) { $fail++ }

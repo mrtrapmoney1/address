@@ -27,6 +27,8 @@ class MockWorksheets : System.Collections.IEnumerable {
         return $s
     }
     [void] Remove([object]$s) { [void]$this.Items.Remove($s); $this.Count = $this.Items.Count }
+    [object] Item([int]$i) { return $this.Items[$i - 1] }
+    [void] AddSheet([object]$s) { $s | Add-Member -NotePropertyName _owner -NotePropertyValue $this -Force; $this.Items.Add($s); $this.Count = $this.Items.Count }
     [System.Collections.IEnumerator] GetEnumerator() { return $this.Items.GetEnumerator() }
 }
 
@@ -40,6 +42,14 @@ function New-MockSheet([string]$name) {
     $sheet | Add-Member ScriptMethod Range { param($a, $b) New-MockRange $this $a.Row $a.Col $b.Row $b.Col }
     $sheet | Add-Member ScriptMethod Columns { param($n) New-MockColumn $this $n }
     $sheet | Add-Member ScriptMethod Delete { if ($this._owner) { $this._owner.Remove($this) } }
+    $sheet | Add-Member ScriptProperty UsedRange {
+        $maxR = 1; $maxC = 1
+        foreach ($k in $this._cells.Keys) { $rc = $k -split ','; $r = [int]$rc[0]; $c = [int]$rc[1]; if ($r -gt $maxR) { $maxR = $r }; if ($c -gt $maxC) { $maxC = $c } }
+        $ur = [pscustomobject]@{ Row = 1; Column = 1 }
+        $ur | Add-Member NoteProperty Rows ([pscustomobject]@{ Count = $maxR })
+        $ur | Add-Member NoteProperty Columns ([pscustomobject]@{ Count = $maxC })
+        $ur
+    }
     return $sheet
 }
 
@@ -51,7 +61,15 @@ function New-MockCell($sheet, [int]$r, [int]$c) {
 
 function New-MockRange($sheet, [int]$r1, [int]$c1, [int]$r2, [int]$c2) {
     $rng = [pscustomobject]@{ Sheet = $sheet; R1 = $r1; C1 = $c1; R2 = $r2; C2 = $c2 }
-    $rng | Add-Member ScriptProperty Value2 { $null } {
+    $rng | Add-Member ScriptProperty Value2 {
+        # getter: single cell -> scalar; otherwise a 0-based (rows x cols) 2-D
+        # array, which Get-Nth reads the same way Excel's 1-based array is read.
+        $rows = $this.R2 - $this.R1 + 1; $cols = $this.C2 - $this.C1 + 1
+        if ($rows -eq 1 -and $cols -eq 1) { return $this.Sheet._get($this.R1, $this.C1) }
+        $arr = [Array]::CreateInstance([object], $rows, $cols)
+        for ($i = 0; $i -lt $rows; $i++) { for ($j = 0; $j -lt $cols; $j++) { $arr.SetValue($this.Sheet._get($this.R1 + $i, $this.C1 + $j), $i, $j) } }
+        return $arr
+    } {
         param($v)
         $rows = $this.R2 - $this.R1 + 1; $cols = $this.C2 - $this.C1 + 1
         if ($v -is [Array] -and $v.Rank -eq 2) {
@@ -89,6 +107,28 @@ function New-MockWorkbook {
     $first = $wsx.Add(); $first.Name = 'Sheet1'   # a fresh workbook opens with one sheet
     $wb = [pscustomobject]@{ Worksheets = $wsx; SavedPath = $null; SavedFormat = $null; Closed = $false }
     $wb | Add-Member ScriptMethod SaveAs { param($p, $fmt) $this.SavedPath = $p; $this.SavedFormat = $fmt }
+    $wb | Add-Member ScriptMethod Save { $this.Saved = $true }
+    $wb | Add-Member ScriptMethod Close { param($save) $this.Closed = $true }
+    $wb | Add-Member NoteProperty Saved $false -Force
+    return $wb
+}
+
+# Build a mock workbook whose first sheet is filled from a header array + rows.
+#   $headers : 1-based column -> header string (index 0 unused)
+#   $rows    : array of arrays; each inner array is 1-based columns (index 0 unused)
+# Data is written starting at sheet row 1 (headers) then row 2..; caller decides layout.
+function New-MockDataWorkbook([object[]]$grid) {
+    # $grid: array of rows; each row is an array of cell values (0-based columns).
+    $wsx = [MockWorksheets]::new()
+    $sh = New-MockSheet 'Sheet1'
+    $wsx.AddSheet($sh)
+    for ($r = 0; $r -lt $grid.Count; $r++) {
+        $line = $grid[$r]
+        for ($c = 0; $c -lt $line.Count; $c++) { if ($null -ne $line[$c]) { $sh._set($r + 1, $c + 1, $line[$c]) } }
+    }
+    $wb = [pscustomobject]@{ Worksheets = $wsx; SavedPath = $null; SavedFormat = $null; Closed = $false; Saved = $false }
+    $wb | Add-Member ScriptMethod SaveAs { param($p, $fmt) $this.SavedPath = $p; $this.SavedFormat = $fmt }
+    $wb | Add-Member ScriptMethod Save { $this.Saved = $true }
     $wb | Add-Member ScriptMethod Close { param($save) $this.Closed = $true }
     return $wb
 }
@@ -107,8 +147,14 @@ function New-MockExcel {
         }
         return $n
     }
-    $wbks = [pscustomobject]@{ _books = @() }
+    $wbks = [pscustomobject]@{ _books = @(); _openMap = @{} }
     $wbks | Add-Member ScriptMethod Add { $b = New-MockWorkbook; $this._books += $b; $b }
+    # Open returns a workbook previously registered for that path (via _openMap).
+    $wbks | Add-Member ScriptMethod Open { param($path, $updateLinks, $readOnly) $key = "$path"; if ($this._openMap.ContainsKey($key)) { return $this._openMap[$key] } else { throw "mock Workbooks.Open: no workbook registered for '$key'" } }
     $excel = [pscustomobject]@{ WorksheetFunction = $wf; Workbooks = $wbks }
+    # settable application properties the script touches
+    foreach ($prop in 'Visible', 'DisplayAlerts', 'ScreenUpdating', 'EnableEvents', 'AskToUpdateLinks', 'Calculation') {
+        $excel | Add-Member -NotePropertyName $prop -NotePropertyValue $null -Force
+    }
     return $excel
 }

@@ -88,7 +88,9 @@ WrGood "Working paper: $($wbFile.Name)"
 
 # ============================================================================
 WrHead 'Opening the workbook'
-$script:excel = New-Object -ComObject Excel.Application
+# Excel is injectable for the integration test (New-NeExcelForTest). In normal
+# use that function does not exist, so this is a plain COM Excel.Application.
+$script:excel = if (Get-Command -Name New-NeExcelForTest -ErrorAction SilentlyContinue) { New-NeExcelForTest } else { New-Object -ComObject Excel.Application }
 $excel = $script:excel
 $excel.Visible = $false; $excel.DisplayAlerts = $false; $excel.ScreenUpdating = $false; $excel.EnableEvents = $false; $excel.AskToUpdateLinks = $false
 $wb = $null
