@@ -166,7 +166,7 @@ elseif (-not $NonInteractive) { $ans = Read-Host "  Result location (Enter = end
 $writeFlag = [bool]$IncludeFlag
 if (-not $IncludeFlag -and -not $NonInteractive) { $af = Read-Host '  Also add a Match Flag column? (y/N)'; if ($af -match '^[Yy]') { $writeFlag = $true } }
 if ($insertAt -gt 0) { WrGood "Insert at column $(Get-ColLetter $insertAt)." } else { WrGood 'Append at end.' }
-G $(if ($writeFlag) { 'Columns: NE City Code (000) + Match Flag.' } else { 'Column: NE City Code only (000).' })
+WrGood $(if ($writeFlag) { 'Columns: NE City Code (000) + Match Flag.' } else { 'Column: NE City Code only (000).' })
 
 if (-not $NonInteractive) { $go = Read-Host "`n  Press Enter to run, or N to cancel"; if ($go -match '^[Nn]') { $wb.Close($false); $excel.Quit(); exit 0 } }
 
@@ -232,7 +232,7 @@ function Read-QuarterColumns($path) {
         if ($yv -and -not $yv.ToUpper().Contains('CITY CODE')) { throw "column Y of $(Split-Path $path -Leaf) is '$yv', not 'City Code (final)'" }
         $qUsed = $qws.UsedRange; $qLast = $qUsed.Row + $qUsed.Rows.Count - 1; $qFirst = $qHdr + 1; $qn = $qLast - $qFirst + 1
         if ($qn -lt 1) { throw "no data rows in $(Split-Path $path -Leaf)" }
-        function RC([int]$col) {
+        function RdCol([int]$col) {
             $arr = New-Object 'object[]' $qn; $done = 0
             while ($done -lt $qn) { $take = [Math]::Min($ReadChunk, $qn - $done); $r1 = $qFirst + $done; $r2 = $r1 + $take - 1
                 $vals = $qws.Range($qws.Cells($r1, $col), $qws.Cells($r2, $col)).Value2
@@ -241,7 +241,7 @@ function Read-QuarterColumns($path) {
             return , $arr
         }
         $dr = New-Object 'object[]' $qn; for ($i = 0; $i -lt $qn; $i++) { $dr[$i] = $qFirst + $i }
-        $res = @{ n = $qn; dr = $dr; key = (RC 24); lo = (RC 3); hi = (RC 4); e = (RC 5); h = (RC 8); code = (RC 25); concat = $(if ($anyZip9) { RC 23 } else { $null }) }
+        $res = @{ n = $qn; dr = $dr; key = (RdCol 24); lo = (RdCol 3); hi = (RdCol 4); e = (RdCol 5); h = (RdCol 8); code = (RdCol 25); concat = $(if ($anyZip9) { RdCol 23 } else { $null }) }
         return $res
     } finally { $qwb.Close($false) }
 }
