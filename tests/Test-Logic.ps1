@@ -1,4 +1,4 @@
-# Unit tests for the pure (non-COM) logic lifted verbatim from Get-NeTaxCode.ps1
+# Unit tests for the pure (non-COM) logic lifted verbatim from the matcher/paste libraries
 $ErrorActionPreference = 'Stop'
 $script:fail = 0; $script:pass = 0
 function Assert($cond, $msg) { if ($cond) { $script:pass++ } else { $script:fail++; Write-Host "  FAIL: $msg" -ForegroundColor Red } }

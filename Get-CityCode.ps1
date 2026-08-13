@@ -51,11 +51,11 @@ foreach ($lib in @('NeDicts.ps1','NeMatch.ps1','NeTaxPaste.ps1')) {
 . (Join-Path $folder 'NeMatch.ps1')       # also dot-sources NeDicts.ps1
 . (Join-Path $folder 'NeTaxPaste.ps1')
 
-function H($t) { Write-Host ''; Write-Host ('=' * 72) -ForegroundColor DarkCyan; Write-Host "  $t" -ForegroundColor Cyan; Write-Host ('=' * 72) -ForegroundColor DarkCyan }
-function S($t) { Write-Host "  $t" -ForegroundColor Gray }
-function G($t) { Write-Host "  $t" -ForegroundColor Green }
-function W2($t){ Write-Host "  $t" -ForegroundColor Yellow }
-function Die($t) { Write-Host "  $t" -ForegroundColor Red; if ($script:excel) { try { $script:excel.Quit() } catch {} }; if (-not $NonInteractive) { Read-Host '  Press Enter to close' }; exit 1 }
+function WrHead($t) { Write-Host ''; Write-Host ('=' * 72) -ForegroundColor DarkCyan; Write-Host "  $t" -ForegroundColor Cyan; Write-Host ('=' * 72) -ForegroundColor DarkCyan }
+function WrStep($t) { Write-Host "  $t" -ForegroundColor Gray }
+function WrGood($t) { Write-Host "  $t" -ForegroundColor Green }
+function WrWarn($t){ Write-Host "  $t" -ForegroundColor Yellow }
+function WrDie($t) { Write-Host "  $t" -ForegroundColor Red; if ($script:excel) { try { $script:excel.Quit() } catch {} }; if (-not $NonInteractive) { Read-Host '  Press Enter to close' }; exit 1 }
 
 function Get-Nth($arr, [int]$i) {
     if ($null -eq $arr) { return $null }
@@ -65,44 +65,44 @@ function Get-Nth($arr, [int]$i) {
 }
 
 # ============================================================================
-H 'Nebraska City Tax Code  (pure PowerShell)'
-S "Folder: $folder"
+WrHead 'Nebraska City Tax Code  (pure PowerShell)'
+WrStep "Folder: $folder"
 $addrFolder = Join-Path $folder '_Address'
-if (-not (Test-Path -LiteralPath $addrFolder)) { Die "The '_Address' folder was not found next to this script." }
+if (-not (Test-Path -LiteralPath $addrFolder)) { WrDie "The '_Address' folder was not found next to this script." }
 $qMap = @{}
 foreach ($f in (Get-ChildItem -LiteralPath $addrFolder -File -Filter '*.xlsx' | Where-Object { $_.Name -notlike '~$*' })) {
     if ($f.Name -match '(?<y>(19|20)\d{2}).{0,3}?Q(?<q>[1-4])') { $k = "$($Matches['y']) Q$($Matches['q'])"; if (-not $qMap.ContainsKey($k)) { $qMap[$k] = $f.FullName } }
 }
-if ($qMap.Count -eq 0) { Die 'No quarterly files found in _Address (need names like "2021 Q3 Address Data.xlsx").' }
-G "_Address holds $($qMap.Count) quarterly file(s)."
+if ($qMap.Count -eq 0) { WrDie 'No quarterly files found in _Address (need names like "2021 Q3 Address Data.xlsx").' }
+WrGood "_Address holds $($qMap.Count) quarterly file(s)."
 
 # ---- working paper ----
-if ($WorkingPaper) { if (-not (Test-Path -LiteralPath $WorkingPaper)) { Die "Working paper not found: $WorkingPaper" }; $wbFile = Get-Item -LiteralPath $WorkingPaper }
+if ($WorkingPaper) { if (-not (Test-Path -LiteralPath $WorkingPaper)) { WrDie "Working paper not found: $WorkingPaper" }; $wbFile = Get-Item -LiteralPath $WorkingPaper }
 else {
     $books = Get-ChildItem -LiteralPath $folder -File | Where-Object { $_.Extension -match '^\.(xlsx|xlsm|xlsb)$' -and $_.Name -notlike '~$*' } | Sort-Object Name
-    if ($books.Count -eq 0) { Die 'No working paper found in this folder.' }
+    if ($books.Count -eq 0) { WrDie 'No working paper found in this folder.' }
     if ($books.Count -eq 1 -or $NonInteractive) { $wbFile = $books[0] }
     else { Write-Host ''; for ($i = 0; $i -lt $books.Count; $i++) { Write-Host ("   [{0}]  {1}" -f ($i + 1), $books[$i].Name) }; do { $pick = Read-Host "`n  Which workbook is the working paper? (number)" } while (-not ($pick -as [int]) -or [int]$pick -lt 1 -or [int]$pick -gt $books.Count); $wbFile = $books[[int]$pick - 1] }
 }
-G "Working paper: $($wbFile.Name)"
+WrGood "Working paper: $($wbFile.Name)"
 
 # ============================================================================
-H 'Opening the workbook'
+WrHead 'Opening the workbook'
 $script:excel = New-Object -ComObject Excel.Application
 $excel = $script:excel
 $excel.Visible = $false; $excel.DisplayAlerts = $false; $excel.ScreenUpdating = $false; $excel.EnableEvents = $false; $excel.AskToUpdateLinks = $false
 $wb = $null
-try { $wb = $excel.Workbooks.Open($wbFile.FullName, 0, $false) } catch { Die "Could not open the workbook: $($_.Exception.Message)" }
+try { $wb = $excel.Workbooks.Open($wbFile.FullName, 0, $false) } catch { WrDie "Could not open the workbook: $($_.Exception.Message)" }
 $prevCalc = $xlCalcAutomatic; try { $prevCalc = $excel.Calculation; $excel.Calculation = $xlCalcManual } catch {}
 
 $sheets = @(); foreach ($s in $wb.Worksheets) { $sheets += $s }
-if ($SheetName) { $ws = $sheets | Where-Object { $_.Name -eq $SheetName } | Select-Object -First 1; if (-not $ws) { Die "No sheet named '$SheetName'." } }
+if ($SheetName) { $ws = $sheets | Where-Object { $_.Name -eq $SheetName } | Select-Object -First 1; if (-not $ws) { WrDie "No sheet named '$SheetName'." } }
 elseif ($sheets.Count -eq 1 -or $NonInteractive) { $ws = $sheets[0] }
 else { Write-Host ''; for ($i = 0; $i -lt $sheets.Count; $i++) { Write-Host ("   [{0}]  {1}" -f ($i + 1), $sheets[$i].Name) }; do { $pick = Read-Host "`n  Which sheet holds the data? (number)" } while (-not ($pick -as [int]) -or [int]$pick -lt 1 -or [int]$pick -gt $sheets.Count); $ws = $sheets[[int]$pick - 1] }
-G "Sheet: $($ws.Name)"
+WrGood "Sheet: $($ws.Name)"
 
 # ============================================================================
-H 'Which columns'
+WrHead 'Which columns'
 $hdrRow = 1
 if ($HeaderRow -gt 0) { $hdrRow = $HeaderRow }
 elseif (-not $NonInteractive) { $x = Read-Host '  Which row holds the headers? (Enter = 1)'; if ($x -and ($x -as [int])) { $hdrRow = [int]$x } }
@@ -112,7 +112,7 @@ $lastRow = $used.Row + $used.Rows.Count - 1
 $lastCol = $used.Column + $used.Columns.Count - 1
 $firstDataRow = $hdrRow + 1
 $nRows = $lastRow - $firstDataRow + 1
-if ($nRows -lt 1) { Die 'No data rows below the header row.' }
+if ($nRows -lt 1) { WrDie 'No data rows below the header row.' }
 
 $headers = New-Object 'string[]' ($lastCol + 1)
 for ($c = 1; $c -le $lastCol; $c++) { $v = $ws.Cells($hdrRow, $c).Value2; $headers[$c] = if ($null -eq $v) { '' } else { [string]$v } }
@@ -124,15 +124,15 @@ for ($c = 1; $c -le $lastCol; $c++) { $nm = $headers[$c]; if (-not $nm) { $nm = 
 function Ask-Column([string]$what, [bool]$optional, [string[]]$hints) {
     $guess = 0
     for ($c = 1; $c -le $lastCol; $c++) { $h = ($headers[$c] -replace '[^A-Za-z0-9]', '').ToUpper(); if (-not $h) { continue }; foreach ($hint in $hints) { if ($h -eq $hint -or $h -like "*$hint*") { $guess = $c; break } }; if ($guess) { break } }
-    if ($NonInteractive) { if ($guess) { return $guess } elseif ($optional) { return 0 } else { Die "Could not auto-detect the $what column." } }
+    if ($NonInteractive) { if ($guess) { return $guess } elseif ($optional) { return 0 } else { WrDie "Could not auto-detect the $what column." } }
     while ($true) {
         $sfx = if ($optional) { "  (0 = none)" } else { "" }; $def = if ($guess) { " [Enter = $guess : $($headers[$guess])]" } else { "" }
         $ans = Read-Host "  Column for the $what$sfx$def"
-        if (-not $ans) { if ($guess) { return $guess }; if ($optional) { return 0 }; W2 '   Required.'; continue }
+        if (-not $ans) { if ($guess) { return $guess }; if ($optional) { return 0 }; WrWarn '   Required.'; continue }
         if ($optional -and ($ans.Trim() -eq '0' -or $ans.Trim() -match '^(none|no|n/a|na)$')) { return 0 }
-        if ($ans -as [int]) { $n = [int]$ans; if ($n -ge 1 -and $n -le $lastCol) { return $n }; W2 '   Out of range.'; continue }
+        if ($ans -as [int]) { $n = [int]$ans; if ($n -ge 1 -and $n -le $lastCol) { return $n }; WrWarn '   Out of range.'; continue }
         for ($c = 1; $c -le $lastCol; $c++) { if ($headers[$c] -and $headers[$c].Trim().ToUpper() -eq $ans.Trim().ToUpper()) { return $c } }
-        W2 '   No header by that name.'
+        WrWarn '   No header by that name.'
     }
 }
 Write-Host ''
@@ -144,42 +144,42 @@ $colState= Ask-Column 'STATE' $true @('SHIPTOSTATE','SOURCEDTOSTATE','BILLTOSTAT
 
 $fixedQuarter = $null
 if ($colDate -eq 0) {
-    if ($qMap.Count -eq 1) { $fixedQuarter = @($qMap.Keys)[0]; W2 "No date column; using the only quarter present: $fixedQuarter" }
-    elseif ($NonInteractive) { Die 'No date column and multiple quarters; cannot choose in -NonInteractive.' }
+    if ($qMap.Count -eq 1) { $fixedQuarter = @($qMap.Keys)[0]; WrWarn "No date column; using the only quarter present: $fixedQuarter" }
+    elseif ($NonInteractive) { WrDie 'No date column and multiple quarters; cannot choose in -NonInteractive.' }
     else {
-        Write-Host ''; W2 'No date column. Which period does the whole sheet use?'
-        S ('Available: ' + (($qMap.Keys | Sort-Object | ForEach-Object { $_ -replace ' ','' }) -join '  '))
+        Write-Host ''; WrWarn 'No date column. Which period does the whole sheet use?'
+        WrStep ('Available: ' + (($qMap.Keys | Sort-Object | ForEach-Object { $_ -replace ' ','' }) -join '  '))
         while ($true) { $ans = Read-Host '  Period (YYYYQX, e.g. 2021Q3)'; $k = $null
             if ($ans -match '^\s*(?<y>(19|20)\d{2})\s*[-_ ]?[Qq]?\s*(?<q>[1-4])\s*$') { $k = "$($Matches['y']) Q$($Matches['q'])" }
-            if ($k -and $qMap.ContainsKey($k)) { $fixedQuarter = $k; break }; W2 '   Not found. Pick from the list.' }
+            if ($k -and $qMap.ContainsKey($k)) { $fixedQuarter = $k; break }; WrWarn '   Not found. Pick from the list.' }
     }
 }
 $assumeNE = $false
-if ($colState -eq 0) { if ($NonInteractive) { $assumeNE = $true } else { $a = Read-Host '  No state column. Treat EVERY row as Nebraska? (Y/N)'; if ($a -match '^[Yy]') { $assumeNE = $true } else { Die 'A state column is needed.' } } }
+if ($colState -eq 0) { if ($NonInteractive) { $assumeNE = $true } else { $a = Read-Host '  No state column. Treat EVERY row as Nebraska? (Y/N)'; if ($a -match '^[Yy]') { $assumeNE = $true } else { WrDie 'A state column is needed.' } } }
 
 # ---- output options ----
 Write-Host ''
 Write-Host '  Result: press ENTER to append at the end, or type a column (e.g. T) to INSERT there.' -ForegroundColor White
 $insertAt = 0
-if ($PasteAt) { if ($PasteAt.Trim().ToUpper() -ne 'END') { $insertAt = Resolve-PasteLocation $PasteAt $headers $lastCol; if ($insertAt -lt 1) { Die "Could not understand paste location '$PasteAt'." } } }
-elseif (-not $NonInteractive) { $ans = Read-Host "  Result location (Enter = end)"; if ($ans) { $insertAt = Resolve-PasteLocation $ans $headers $lastCol; if ($insertAt -lt 1) { W2 '   Not recognised - appending at end.'; $insertAt = 0 } } }
+if ($PasteAt) { if ($PasteAt.Trim().ToUpper() -ne 'END') { $insertAt = Resolve-PasteLocation $PasteAt $headers $lastCol; if ($insertAt -lt 1) { WrDie "Could not understand paste location '$PasteAt'." } } }
+elseif (-not $NonInteractive) { $ans = Read-Host "  Result location (Enter = end)"; if ($ans) { $insertAt = Resolve-PasteLocation $ans $headers $lastCol; if ($insertAt -lt 1) { WrWarn '   Not recognised - appending at end.'; $insertAt = 0 } } }
 $writeFlag = [bool]$IncludeFlag
 if (-not $IncludeFlag -and -not $NonInteractive) { $af = Read-Host '  Also add a Match Flag column? (y/N)'; if ($af -match '^[Yy]') { $writeFlag = $true } }
-if ($insertAt -gt 0) { G "Insert at column $(Get-ColLetter $insertAt)." } else { G 'Append at end.' }
+if ($insertAt -gt 0) { WrGood "Insert at column $(Get-ColLetter $insertAt)." } else { WrGood 'Append at end.' }
 G $(if ($writeFlag) { 'Columns: NE City Code (000) + Match Flag.' } else { 'Column: NE City Code only (000).' })
 
 if (-not $NonInteractive) { $go = Read-Host "`n  Press Enter to run, or N to cancel"; if ($go -match '^[Nn]') { $wb.Close($false); $excel.Quit(); exit 0 } }
 
 # ============================================================================
-H 'Backup'
+WrHead 'Backup'
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $bakDir = Join-Path $folder '_Backups'; if (-not (Test-Path -LiteralPath $bakDir)) { New-Item -ItemType Directory -Path $bakDir | Out-Null }
 $bak = Join-Path $bakDir ("{0}_{1}{2}" -f [IO.Path]::GetFileNameWithoutExtension($wbFile.Name), $stamp, $wbFile.Extension)
 Copy-Item -LiteralPath $wbFile.FullName -Destination $bak -Force
-G "Backup: _Backups\$(Split-Path $bak -Leaf)"
+WrGood "Backup: _Backups\$(Split-Path $bak -Leaf)"
 
 # ============================================================================
-H 'Reading the workpaper'
+WrHead 'Reading the workpaper'
 function Read-Col([int]$col) {
     $out = New-Object 'string[]' $nRows; $done = 0
     while ($done -lt $nRows) { $take = [Math]::Min($ReadChunk, $nRows - $done); $r1 = $firstDataRow + $done; $r2 = $r1 + $take - 1
@@ -191,10 +191,10 @@ function Read-Col([int]$col) {
 $aAddr = Read-Col $colAddr; $aCity = Read-Col $colCity; $aZip = Read-Col $colZip
 $aDate = if ($colDate -gt 0) { Read-Col $colDate } else { $null }
 $aState = if ($assumeNE) { $null } else { Read-Col $colState }
-G "Read $nRows row(s)."
+WrGood "Read $nRows row(s)."
 
 # ============================================================================
-H 'Grouping rows into quarters'
+WrHead 'Grouping rows into quarters'
 function Get-Quarter([string]$v) {
     if (-not $v) { return $null }
     $s = ($v -replace '[^0-9]', '')
@@ -217,10 +217,10 @@ for ($i = 0; $i -lt $nRows; $i++) {
     if (-not $groups.ContainsKey($q)) { $groups[$q] = New-Object 'System.Collections.Generic.List[int]' }
     $groups[$q].Add($i)
 }
-if ($groups.Count -eq 0) { W2 'No rows matched a quarterly file.' } else { foreach ($k in ($groups.Keys | Sort-Object)) { S ("{0}  ->  {1,8:N0} row(s)" -f $k, $groups[$k].Count) } }
+if ($groups.Count -eq 0) { WrWarn 'No rows matched a quarterly file.' } else { foreach ($k in ($groups.Keys | Sort-Object)) { WrStep ("{0}  ->  {1,8:N0} row(s)" -f $k, $groups[$k].Count) } }
 
 # ============================================================================
-H 'Matching against the tax data'
+WrHead 'Matching against the tax data'
 function Read-QuarterColumns($path) {
     $qwb = $excel.Workbooks.Open($path, 0, $true)
     try {
@@ -249,14 +249,14 @@ function Read-QuarterColumns($path) {
 $qi = 0
 foreach ($q in ($groups.Keys | Sort-Object)) {
     $qi++
-    S ("[{0}/{1}] {2}: loading tax data..." -f $qi, $groups.Count, $q)
+    WrStep ("[{0}/{1}] {2}: loading tax data..." -f $qi, $groups.Count, $q)
     $t0 = Get-Date
-    try { $qd = Read-QuarterColumns $qMap[$q] } catch { Die "Quarter $q failed: $($_.Exception.Message)" }
+    try { $qd = Read-QuarterColumns $qMap[$q] } catch { WrDie "Quarter $q failed: $($_.Exception.Message)" }
     # normalise code to int
     $codeArr = New-Object 'object[]' $qd.n
     for ($i = 0; $i -lt $qd.n; $i++) { $cy = 0.0; $codeArr[$i] = if ([double]::TryParse("$($qd.code[$i])", [ref]$cy)) { [int]$cy } else { $null } }
     $index = New-NeIndex $qd.dr $qd.key $qd.lo $qd.hi $qd.e $qd.h $codeArr $qd.concat
-    S ("      {0:N0} tax rows in {1:N1}s; matching {2:N0} address(es)..." -f $qd.n, ((Get-Date) - $t0).TotalSeconds, $groups[$q].Count)
+    WrStep ("      {0:N0} tax rows in {1:N1}s; matching {2:N0} address(es)..." -f $qd.n, ((Get-Date) - $t0).TotalSeconds, $groups[$q].Count)
     $repaired = 0
     foreach ($ri in $groups[$q]) {
         $p = Get-NeParse $aAddr[$ri] $aCity[$ri] $aZip[$ri]
@@ -273,22 +273,22 @@ foreach ($q in ($groups.Keys | Sort-Object)) {
         }
         $finalCode[$ri] = $m.Code; $finalFlag[$ri] = $m.Flag
     }
-    if ($repaired -gt 0) { S ("      fuzzy repair recovered {0:N0} address(es)" -f $repaired) }
+    if ($repaired -gt 0) { WrStep ("      fuzzy repair recovered {0:N0} address(es)" -f $repaired) }
     $index = $null; [System.GC]::Collect()
 }
-G 'Matching complete.'
+WrGood 'Matching complete.'
 
 # ============================================================================
-H 'Writing the code onto the working paper'
+WrHead 'Writing the code onto the working paper'
 if ($writeFlag) { $headerNames = @('NE City Code','Match Flag'); $columns = $finalCode, $finalFlag } else { $headerNames = @('NE City Code'); $columns = , $finalCode }
 $excel.ScreenUpdating = $true
 $startCol = Write-ResultBlock $ws $excel $hdrRow $firstDataRow $lastRow $lastCol $nRows $insertAt $headerNames $columns $ReadChunk $CodeNumberFormat 0
-if ($insertAt -gt 0) { S "Inserted at $(Get-ColLetter $startCol) (existing data shifted right)." } else { S "Appended at $(Get-ColLetter $startCol)." }
-S "NE City Code -> column $(Get-ColLetter $startCol), formatted $CodeNumberFormat"
-if ($writeFlag) { S "Match Flag   -> column $(Get-ColLetter ($startCol + 1))" }
+if ($insertAt -gt 0) { WrStep "Inserted at $(Get-ColLetter $startCol) (existing data shifted right)." } else { WrStep "Appended at $(Get-ColLetter $startCol)." }
+WrStep "NE City Code -> column $(Get-ColLetter $startCol), formatted $CodeNumberFormat"
+if ($writeFlag) { WrStep "Match Flag   -> column $(Get-ColLetter ($startCol + 1))" }
 
 # ============================================================================
-H 'Building the Report sheet'
+WrHead 'Building the Report sheet'
 # flag summary (base flag, i.e. everything before " - REPAIRED")
 $tally2 = @{}
 for ($i = 0; $i -lt $nRows; $i++) { $f = $finalFlag[$i]; if (-not $f) { $f = '(blank)' }; $b = ($f -split ' - ')[0].Trim(); if (-not $tally2.ContainsKey($b)) { $tally2[$b] = 0 }; $tally2[$b]++ }
@@ -303,23 +303,23 @@ for ($i = 0; $i -lt $nRows; $i++) {
 $uniqueRows = $uniq.Values | Sort-Object @{e = { ($_.Flag -split ' - ')[0] } }, @{e = { -$_.Count } }, City, Address
 try {
     $rep = New-NeReport $excel $wb 'Report' $flagRows $uniqueRows $CodeNumberFormat
-    G "Report sheet written: '$($rep.Sheet)' ($($uniqueRows.Count) unique address(es))."
-} catch { W2 "Could not build the Report sheet: $($_.Exception.Message)" }
+    WrGood "Report sheet written: '$($rep.Sheet)' ($($uniqueRows.Count) unique address(es))."
+} catch { WrWarn "Could not build the Report sheet: $($_.Exception.Message)" }
 
 # ============================================================================
-H 'Saving'
+WrHead 'Saving'
 try { $excel.Calculation = $prevCalc } catch { $excel.Calculation = $xlCalcAutomatic }
 $saved = $false
-for ($a = 1; $a -le 4 -and -not $saved; $a++) { try { $wb.Save(); $saved = $true } catch { W2 "Save attempt $a failed: $($_.Exception.Message)"; Start-Sleep -Seconds ([Math]::Pow(2, $a)) } }
-if (-not $saved) { $alt = Join-Path $folder ("{0}_RESULTS_{1}{2}" -f [IO.Path]::GetFileNameWithoutExtension($wbFile.Name), $stamp, $wbFile.Extension); try { $wb.SaveAs($alt); $saved = $true; W2 "Saved a copy as $(Split-Path $alt -Leaf)." } catch {} }
-if ($saved) { G "Saved: $($wbFile.Name)" } else { Write-Host '  COULD NOT SAVE - do not close Excel until you save by hand.' -ForegroundColor Red }
+for ($a = 1; $a -le 4 -and -not $saved; $a++) { try { $wb.Save(); $saved = $true } catch { WrWarn "Save attempt $a failed: $($_.Exception.Message)"; Start-Sleep -Seconds ([Math]::Pow(2, $a)) } }
+if (-not $saved) { $alt = Join-Path $folder ("{0}_RESULTS_{1}{2}" -f [IO.Path]::GetFileNameWithoutExtension($wbFile.Name), $stamp, $wbFile.Extension); try { $wb.SaveAs($alt); $saved = $true; WrWarn "Saved a copy as $(Split-Path $alt -Leaf)." } catch {} }
+if ($saved) { WrGood "Saved: $($wbFile.Name)" } else { Write-Host '  COULD NOT SAVE - do not close Excel until you save by hand.' -ForegroundColor Red }
 
 # ============================================================================
-H 'Summary'
+WrHead 'Summary'
 $tally = @{}
 for ($i = 0; $i -lt $nRows; $i++) { $f = $finalFlag[$i]; if (-not $f) { $f = '(blank)' }; if (-not $tally.ContainsKey($f)) { $tally[$f] = 0 }; $tally[$f]++ }
 foreach ($k in ($tally.Keys | Sort-Object { -$tally[$_] })) { Write-Host ("   {0,-16} {1,8:N0}   {2,5:N1}%" -f $k, $tally[$k], (100 * $tally[$k] / $nRows)) }
 Write-Host ''
-G ("Finished in {0:N1} min." -f ((Get-Date) - $StartTime).TotalMinutes)
+WrGood ("Finished in {0:N1} min." -f ((Get-Date) - $StartTime).TotalMinutes)
 $excel.Visible = $true; $excel.EnableEvents = $true
 if (-not $NonInteractive) { Read-Host '  Excel is open with your results. Press Enter to close this window' }

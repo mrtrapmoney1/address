@@ -12,8 +12,8 @@
    * the engine backup is values only, one sheet per quarter, no formulas.
 
  Dot-source it:   . .\NeTaxPaste.ps1
- Both Get-NeTaxCode.ps1 (production) and tests\Test-Paste.ps1 (verification)
- call these exact functions, so the test proves the real thing.
+ Get-CityCode.ps1 (production), the legacy Get-NeTaxCode.ps1, and
+ tests\Test-Paste.ps1 all call these exact functions, so the test proves the real thing.
 ================================================================================
 #>
 
