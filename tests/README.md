@@ -14,13 +14,19 @@ here; these target the script's read/shape/write code. Everything is PowerShell.
 
 ## Run it
 
+Works in Windows PowerShell 5.1 - you do **not** need `pwsh` (that's PowerShell 7).
+From this folder:
+
 ```powershell
-pwsh -File tests\Run-AllTests.ps1                     # logic + paste, one summary
-pwsh -File tests\Check-Workpaper.ps1 -Path ".\Your Working Paper.xlsx" -HeaderRow 4
+.\tests\Run-AllTests.ps1                              # logic + paste, one summary
+.\tests\Check-Workpaper.ps1 -Path ".\Your Working Paper.xlsx" -HeaderRow 4
 ```
 
-(`powershell` works too - use `powershell -ExecutionPolicy Bypass -File ...` on
-Windows PowerShell 5.1.)
+If a script is blocked, allow it for this session first:
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, or run
+`powershell -ExecutionPolicy Bypass -File tests\Run-AllTests.ps1`.
+You can also run the two suites individually: `.\tests\Test-Logic.ps1` and
+`.\tests\Test-Paste.ps1` (the paste test uses your real Excel automatically).
 
 ## What "good" looks like
 

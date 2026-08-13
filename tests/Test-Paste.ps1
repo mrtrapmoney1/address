@@ -34,22 +34,35 @@ if ($usingReal) {
     Write-Host "Backend: MOCK (no Excel on this machine)" -ForegroundColor Cyan
 }
 
-# helper: make a fresh data sheet with a header row at row 3 and $n data rows
+# helper: make a fresh data sheet with a header row at row 3 and $n data rows.
+# We build it with Range + (N x 1) arrays - the SAME way production writes - so
+# it also exercises that path and dodges a Windows-PowerShell quirk where a
+# scalar Int32 assigned to a single cell's .Value2 throws an InvalidCastException.
 $HDR = 3; $FIRST = 4
+function Set-Col($ws, [int]$col, [int]$r1, $values) {
+    $n = $values.Count
+    $blk = [Array]::CreateInstance([object], $n, 1)
+    for ($i = 0; $i -lt $n; $i++) { $blk.SetValue($values[$i], $i, 0) }
+    $ws.Range($ws.Cells($r1, $col), $ws.Cells($r1 + $n - 1, $col)).Value2 = $blk
+}
 function New-Fixture([int]$n) {
     if ($usingReal) { $wb = $excel.Workbooks.Add(); $ws = $wb.Worksheets.Item(1) }
-    else { . (Join-Path $here 'ExcelMock.ps1'); $ws = New-MockSheet 'Data' }
-    # headers row 3: A Loc | B Address | C City | D State | E Zip
-    $h = @('Loc#','Address','City','State','Zip')
-    for ($c = 1; $c -le $h.Count; $c++) { $ws.Cells($HDR, $c).Value2 = $h[$c-1] }
-    for ($i = 0; $i -lt $n; $i++) {
-        $r = $FIRST + $i
-        $ws.Cells($r, 1).Value2 = $i                             # Loc# (int)
-        $ws.Cells($r, 2).Value2 = ("ADDR{0} " -f $i)             # trailing space preserved
-        $ws.Cells($r, 3).Value2 = ("City{0}" -f $i)
-        $ws.Cells($r, 4).Value2 = 'NE'
-        $ws.Cells($r, 5).Value2 = (68000 + $i)                   # Zip (int)
-    }
+    else { $ws = New-MockSheet 'Data' }   # ExcelMock is already dot-sourced at top level
+    # header row (A..E) as a 1 x 5 array.
+    # NOTE: do not name this $hdr - PowerShell variables are case-insensitive, so
+    # $hdr would clobber $HDR (the header row number) and wreck every Cells() call.
+    $hdrNames = @('Loc#','Address','City','State','Zip')
+    $hb = [Array]::CreateInstance([object], 1, 5)
+    for ($c = 0; $c -lt 5; $c++) { $hb.SetValue($hdrNames[$c], 0, $c) }
+    $ws.Range($ws.Cells($HDR, 1), $ws.Cells($HDR, 5)).Value2 = $hb
+    # data columns, each as an (N x 1) array
+    $loc = @(); $adr = @(); $cty = @(); $sta = @(); $zip = @()
+    for ($i = 0; $i -lt $n; $i++) { $loc += $i; $adr += ("ADDR{0} " -f $i); $cty += ("City{0}" -f $i); $sta += 'NE'; $zip += (68000 + $i) }
+    Set-Col $ws 1 $FIRST $loc
+    Set-Col $ws 2 $FIRST $adr
+    Set-Col $ws 3 $FIRST $cty
+    Set-Col $ws 4 $FIRST $sta
+    Set-Col $ws 5 $FIRST $zip
     return $ws
 }
 

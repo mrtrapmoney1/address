@@ -117,11 +117,14 @@ SETTINGS  (top of Get-NeTaxCode.ps1)
   $CodeNumberFormat '000' (three digits). 'General' shows 94 and 0
   $NoCodeCityZero   $false = NO CODE-CITY code left blank; $true = 0
 
-VERIFY IT  (tests\ - all PowerShell)
-------------------------------------
-  pwsh -File tests\Run-AllTests.ps1        logic + paste tests (green = good)
-  pwsh -File tests\Check-Workpaper.ps1 -Path ".\Working Paper.xlsx" -HeaderRow 4
+VERIFY IT  (tests\ - all PowerShell; works in Windows PowerShell 5.1)
+--------------------------------------------------------------------
+  .\tests\Run-AllTests.ps1                 logic + paste tests (green = good)
+  .\tests\Check-Workpaper.ps1 -Path ".\Working Paper.xlsx" -HeaderRow 4
                                            scan a finished paper for scramble/bad codes
+  (or:  powershell -ExecutionPolicy Bypass -File tests\Run-AllTests.ps1 )
+  You do NOT need pwsh / PowerShell 7 - 'pwsh' just means PS7, which you may not
+  have. Run the .ps1 files directly with the powershell you already have.
 See tests\README.md for what each one checks.
 
 THINGS WORTH KNOWING
