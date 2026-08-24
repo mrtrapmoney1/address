@@ -1,0 +1,15 @@
+# Installed by "Invoke-Ocr.ps1 -Install". Large, machine-specific, and
+# restorable with one command - it does not belong in version control.
+js/node_modules/
+
+# Created by each run.
+_OcrRuns/
+_Scans/
+
+# Language data, if someone drops it in by hand instead of using npm.
+js/tessdata/
+
+# Windows and editor litter.
+Thumbs.db
+desktop.ini
+*.swp

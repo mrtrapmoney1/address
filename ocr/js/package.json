@@ -1,0 +1,19 @@
+{
+  "name": "ocr-kit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Scanned pages to positioned words. Node half of the PowerShell OCR toolkit.",
+  "main": "ocr-cli.js",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "ocr": "node ocr-cli.js"
+  },
+  "dependencies": {
+    "tesseract.js": "^7.0.0",
+    "@tesseract.js-data/eng": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
